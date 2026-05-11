@@ -1,7 +1,6 @@
 from crewai import Agent, Task, Crew, Process
-from langchain_openai import ChatOpenAI
 
-llm = ChatOpenAI(model="gpt-4.1")
+llm = "ollama/qwen2.5-coder"
 
 python_analyzer = Agent(
     role="Python HDL Analyzer",
@@ -37,7 +36,11 @@ verification_agent = Agent(
 
 analyze_task = Task(
     description="""
-    Analyze the Python code and extract:
+    Analyze the following Python code:
+
+    {python_code}
+
+    Extract:
     - variables
     - loops
     - state machines
@@ -101,10 +104,10 @@ crew = Crew(
     verbose=True
 )
 
-python_code = """
+python_code = '''
 def adder(a, b):
     return a + b
-"""
+'''
 
 result = crew.kickoff(inputs={
     "python_code": python_code
