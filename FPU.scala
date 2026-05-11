@@ -1,0 +1,1 @@
+Unfortunately, you haven't provided any Chisel code for me to review and fix. If you could please provide the code that's causing the issue, I'd be happy to help you resolve it while keeping it synthesizable and maintaining a testbench.
