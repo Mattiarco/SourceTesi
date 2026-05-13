@@ -1,0 +1,291 @@
+ADVANCED AI-HLS COMPILER REPORT
+
+INPUT: Test.py
+
+IR
+[
+  {
+    "id": "op_1",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "a",
+      "b"
+    ],
+    "output": "op_1",
+    "latency": 1
+  },
+  {
+    "id": "op_2",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "op_1",
+      "b"
+    ],
+    "output": "op_2",
+    "latency": 1
+  },
+  {
+    "id": "op_3",
+    "type": "branch",
+    "operation": "IF",
+    "inputs": [
+      "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])"
+    ],
+    "output": "op_3",
+    "latency": 1
+  },
+  {
+    "id": "op_4",
+    "type": "binary_op",
+    "operation": "Sub",
+    "inputs": [
+      "op_2",
+      "a"
+    ],
+    "output": "op_4",
+    "latency": 1
+  },
+  {
+    "id": "op_5",
+    "type": "loop",
+    "operation": "FOR",
+    "inputs": [
+      "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])"
+    ],
+    "output": "op_5",
+    "latency": 2
+  },
+  {
+    "id": "op_6",
+    "type": "call",
+    "operation": "range",
+    "inputs": [
+      "Constant(value=4)"
+    ],
+    "output": "op_6",
+    "latency": 3
+  },
+  {
+    "id": "op_7",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "op_4",
+      "i"
+    ],
+    "output": "op_7",
+    "latency": 1
+  },
+  {
+    "id": "op_8",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "op_7",
+      "op_1"
+    ],
+    "output": "op_8",
+    "latency": 1
+  }
+]
+
+CRITICAL PATH
+{
+  "a": 0,
+  "b": 0,
+  "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 0,
+  "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 0,
+  "Constant(value=4)": 0,
+  "i": 0,
+  "op_1": 1,
+  "op_3": 1,
+  "op_5": 2,
+  "op_6": 3,
+  "op_2": 2,
+  "op_4": 3,
+  "op_7": 4,
+  "op_8": 5
+}
+
+SCHEDULE
+{
+  "a": 1,
+  "b": 1,
+  "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 1,
+  "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 1,
+  "Constant(value=4)": 1,
+  "i": 1,
+  "op_1": 2,
+  "op_3": 2,
+  "op_5": 3,
+  "op_6": 4,
+  "op_2": 3,
+  "op_4": 4,
+  "op_7": 5,
+  "op_8": 6
+}
+
+PIPELINE
+{
+  "1": [
+    "a",
+    "b",
+    "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])",
+    "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])",
+    "Constant(value=4)",
+    "i"
+  ],
+  "2": [
+    "op_1",
+    "op_3"
+  ],
+  "3": [
+    "op_5",
+    "op_2"
+  ],
+  "4": [
+    "op_6",
+    "op_4"
+  ],
+  "5": [
+    "op_7"
+  ],
+  "6": [
+    "op_8"
+  ]
+}
+
+PYMTL
+from pymtl3 import *
+
+class GeneratedAccelerator(Component):
+
+    def construct(s):
+
+        s.in0 = InPort(32)
+        s.in1 = InPort(32)
+        s.in2 = InPort(32)
+        s.in3 = InPort(32)
+        s.in4 = InPort(32)
+        s.out = OutPort(32)
+
+        s.op_1 = Wire(32)
+        s.op_2 = Wire(32)
+        s.op_3 = Wire(32)
+        s.op_4 = Wire(32)
+        s.op_5 = Wire(32)
+        s.op_6 = Wire(32)
+        s.op_7 = Wire(32)
+        s.op_8 = Wire(32)
+
+        @update
+        def compute():
+
+            s.op_1 @= s.in0 + s.in1
+            s.op_2 @= op_1 * s.in1
+            s.op_4 @= op_2 - s.in0
+            s.op_7 @= op_4 + s.in4
+            s.op_8 @= op_7 * op_1
+            s.out @= s.op_8
+
+AI ANALYSIS
+Deep IR (Intermediate Representation) Analysis and Dependency Tracking Report
+
+1. Introduction:
+
+The Intermediate Representation (IR) is an abstract language for representing a program that serves as an interface between the source code and the machine. Dependency analysis deals with understanding data and control dependencies in programs, which is essential for optimization.
+
+In this report, we discuss a comprehensive approach to deep IR analysis, focusing on tracking dependencies and pipeline characteristics.
+
+2. IR Representation:
+
+The IR used here is based on LLVM’s Intermediate Representation (LLIR). This representation includes instructions, values, and operations that can be analyzed programmatically.
+
+3. Dependency Analysis:
+
+Dependency analysis involves understanding the relationships between different parts of the program:
+
+- **Data Dependencies**: Determine if the result of an instruction depends on some value computed earlier in the execution.
+- **Control Dependencies**: Identify the execution paths (branches) that affect the control flow of a program, leading to different execution scenarios.
+
+4. Data Dependencies
+
+Data dependencies can be categorized as follows:
+   - Read-after-write (RAW): A read before writing results in an incorrect computation.
+   - Write-after-read (WAR): Conflicts between writes before reads.
+   - Write-after-write (WAW):
+   
+We identified data dependencies by performing a forward traversal through the IR:
+
+```python
+def identify_data_dependencies(Instructions):
+    Read_set = set()
+    Dependencies = []
+    
+    for inst in Instructions:
+        uses = get_uses(inst)  # Function to get used operands of an instruction
+
+        Intersections = set.intersection(use_reads(Previous_instructions), uses)
+        
+        if Intersection:  
+            Dependencies += ((Intersection, inst),)
+
+        Read_set |= set(to_read(inst))  # Update read-set before inserting into the next part
+```
+
+
+5. Control Dependencies
+
+Control dependencies were identified through a backward analysis to track branching instructions and their control flow predecessors:
+
+```python
+def identify_control_dependencies(Instructions):
+    Predecessors = {}
+    
+    for inst in Instructions:
+        if is_branch(ininst):  # Branch instruction conditionally transferring control flow
+  
+            branch_targets = get_jump_targets(inst)
+            
+            for target in branch_targets:
+                Predecessors.setdefault(target, []).append(inst)
+
+    return Predecessors
+```
+
+6. Pipeline Analysis:
+
+To identify pipeline characteristics, analyze how instructions fit into the different stages of a processor pipeline:
+
+   - **Issue Stage**: Instructions are issued to the execution engine.
+   - **Execute Stage**: Instructions are processed in functionally grouped blocks (execution units).
+   - **Retire Stage**: Only once an instruction is ready and finalized.
+   
+```plaintext
+        Issue           Dispatch    Execute    Write-back       Retire
+|<----------------->|<------------------>|<-------->|<-------------------->|
+```
+By understanding these stages, we can look for pipeline hazards like resource contention or serialization points.
+
+7. Overall Analysis:
+
+- **Data Hazards**: If multiple instructions in a program have data dependencies, only one such instruction can be executed per cycle (pipeline stall).
+- **Control Hazards**: Branches can introduce control-dependent stalls if not properly resolved (e.g., predicted correctly). Mispredictions lead to additional pipeline stalls.
+
+8. Dependencies and Pipeline Optimization:
+
+   1. Resource Allocation: Identifying dependencies helps allocate hardware resources more efficiently.
+   2. Instruction Scheduling: Understanding the control and data dependencies makes instruction scheduling feasible, which in turn reduces execution time.
+   3. Caching & Prefetching: Dependencies may influence cache optimization policies and prefetching methods.
+
+Optimisation techniques can target identified hazards to improve overall performance, including:
+- Speculative Execution/分支预测
+- Loop Unrolling/减少指令级数据依赖
+
+9. Conclusion:
+
+Deep IR analysis provides invaluable insights into the intricate working of a compiler, enabling targeted optimizations that directly impact runtime efficiency. Dependency tracking and pipeline characteristics are vital steps in this process; they underpin more effective resource allocation, scheduling strategies, and instruction sequencing.
+
+By comprehensively analyzing these aspects, compilers can produce code that is both optimized for execution speed and efficient use of hardware resources. This report outlines a thorough approach to deep IR analysis, dependency identification, and optimization techniques based on pipeline insights.

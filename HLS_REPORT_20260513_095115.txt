@@ -1,0 +1,189 @@
+ADVANCED AI-HLS REPORT
+
+INPUT: Test.py
+
+IR
+[
+  {
+    "id": "op_1",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "a",
+      "b"
+    ],
+    "output": "op_1",
+    "latency": 1
+  },
+  {
+    "id": "op_2",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "c",
+      "b"
+    ],
+    "output": "op_2",
+    "latency": 1
+  },
+  {
+    "id": "op_3",
+    "type": "branch",
+    "operation": "IF",
+    "inputs": [
+      "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])"
+    ],
+    "output": "op_3",
+    "latency": 1
+  },
+  {
+    "id": "op_4",
+    "type": "binary_op",
+    "operation": "Sub",
+    "inputs": [
+      "d",
+      "a"
+    ],
+    "output": "op_4",
+    "latency": 1
+  },
+  {
+    "id": "op_5",
+    "type": "loop",
+    "operation": "FOR",
+    "inputs": [
+      "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])"
+    ],
+    "output": "op_5",
+    "latency": 2
+  },
+  {
+    "id": "op_6",
+    "type": "call",
+    "operation": "range",
+    "inputs": [
+      "Constant(value=4)"
+    ],
+    "output": "op_6",
+    "latency": 3
+  },
+  {
+    "id": "op_7",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "d",
+      "i"
+    ],
+    "output": "op_7",
+    "latency": 1
+  },
+  {
+    "id": "op_8",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "d",
+      "c"
+    ],
+    "output": "op_8",
+    "latency": 1
+  }
+]
+
+CRITICAL PATH
+{
+  "a": 0,
+  "b": 0,
+  "c": 0,
+  "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 0,
+  "d": 0,
+  "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 0,
+  "Constant(value=4)": 0,
+  "i": 0,
+  "op_1": 1,
+  "op_2": 1,
+  "op_3": 1,
+  "op_4": 1,
+  "op_8": 1,
+  "op_5": 2,
+  "op_6": 3,
+  "op_7": 1
+}
+
+SCHEDULE
+{
+  "a": 1,
+  "b": 1,
+  "c": 1,
+  "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 1,
+  "d": 1,
+  "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 1,
+  "Constant(value=4)": 1,
+  "i": 1,
+  "op_1": 2,
+  "op_2": 2,
+  "op_3": 2,
+  "op_4": 2,
+  "op_8": 2,
+  "op_5": 2,
+  "op_6": 2,
+  "op_7": 2
+}
+
+PIPELINE
+{
+  "1": [
+    "a",
+    "b",
+    "c",
+    "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])",
+    "d",
+    "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])",
+    "Constant(value=4)",
+    "i"
+  ],
+  "2": [
+    "op_1",
+    "op_2",
+    "op_3",
+    "op_4",
+    "op_8",
+    "op_5",
+    "op_6",
+    "op_7"
+  ]
+}
+
+PYMTL
+from pymtl3 import *
+
+class GeneratedAccelerator(Component):
+
+    def construct(s):
+
+        s.in0 = InPort(32)
+        s.in1 = InPort(32)
+        s.out = OutPort(32)
+
+        s.op_1 = Wire(32)
+        s.op_2 = Wire(32)
+        s.op_3 = Wire(32)
+        s.op_4 = Wire(32)
+        s.op_5 = Wire(32)
+        s.op_6 = Wire(32)
+        s.op_7 = Wire(32)
+        s.op_8 = Wire(32)
+
+        @update
+        def compute():
+
+            s.op_1 @= s.in0 + s.in1
+            s.op_2 @= c * s.in1
+            s.op_4 @= d - s.in0
+            s.op_7 @= d + i
+            s.op_8 @= d * c
+            s.out @= s.op_8
+
+AI
+Certainly! Please provide the Intermediate Representation (IR) code that you would like me to analyze. Once you share the IR code, I will conduct a thorough analysis and present the complete content of my analysis as your response.
