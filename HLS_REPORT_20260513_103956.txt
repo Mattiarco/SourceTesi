@@ -1,4 +1,4 @@
-ADVANCED AI-HLS REPORT
+ADVANCED AI-HLS COMPILER REPORT
 
 INPUT: Test.py
 
@@ -20,7 +20,7 @@ IR
     "type": "binary_op",
     "operation": "Mult",
     "inputs": [
-      "c",
+      "op_1",
       "b"
     ],
     "output": "op_2",
@@ -41,7 +41,7 @@ IR
     "type": "binary_op",
     "operation": "Sub",
     "inputs": [
-      "d",
+      "op_2",
       "a"
     ],
     "output": "op_4",
@@ -72,7 +72,7 @@ IR
     "type": "binary_op",
     "operation": "Add",
     "inputs": [
-      "d",
+      "op_4",
       "i"
     ],
     "output": "op_7",
@@ -83,8 +83,8 @@ IR
     "type": "binary_op",
     "operation": "Mult",
     "inputs": [
-      "d",
-      "c"
+      "op_7",
+      "op_1"
     ],
     "output": "op_8",
     "latency": 1
@@ -95,40 +95,36 @@ CRITICAL PATH
 {
   "a": 0,
   "b": 0,
-  "c": 0,
   "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 0,
-  "d": 0,
   "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 0,
   "Constant(value=4)": 0,
   "i": 0,
   "op_1": 1,
-  "op_2": 1,
   "op_3": 1,
-  "op_4": 1,
-  "op_8": 1,
   "op_5": 2,
   "op_6": 3,
-  "op_7": 1
+  "op_2": 2,
+  "op_4": 3,
+  "op_7": 4,
+  "op_8": 5
 }
 
 SCHEDULE
 {
   "a": 1,
   "b": 1,
-  "c": 1,
   "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])": 1,
-  "d": 1,
   "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])": 1,
   "Constant(value=4)": 1,
   "i": 1,
   "op_1": 2,
-  "op_2": 2,
   "op_3": 2,
-  "op_4": 2,
-  "op_8": 2,
-  "op_5": 2,
-  "op_6": 2,
-  "op_7": 2
+  "op_5": 3,
+  "op_6": 4,
+  "op_2": 3,
+  "op_4": 4,
+  "op_7": 5,
+  "op_8": 6
 }
 
 PIPELINE
@@ -136,22 +132,28 @@ PIPELINE
   "1": [
     "a",
     "b",
-    "c",
     "Compare(left=Name(id='d', ctx=Load()), ops=[Gt()], comparators=[Constant(value=20)])",
-    "d",
     "Call(func=Name(id='range', ctx=Load()), args=[Constant(value=4)], keywords=[])",
     "Constant(value=4)",
     "i"
   ],
   "2": [
     "op_1",
-    "op_2",
-    "op_3",
-    "op_4",
-    "op_8",
+    "op_3"
+  ],
+  "3": [
     "op_5",
+    "op_2"
+  ],
+  "4": [
     "op_6",
+    "op_4"
+  ],
+  "5": [
     "op_7"
+  ],
+  "6": [
+    "op_8"
   ]
 }
 
@@ -164,6 +166,9 @@ class GeneratedAccelerator(Component):
 
         s.in0 = InPort(32)
         s.in1 = InPort(32)
+        s.in2 = InPort(32)
+        s.in3 = InPort(32)
+        s.in4 = InPort(32)
         s.out = OutPort(32)
 
         s.op_1 = Wire(32)
@@ -179,11 +184,11 @@ class GeneratedAccelerator(Component):
         def compute():
 
             s.op_1 @= s.in0 + s.in1
-            s.op_2 @= c * s.in1
-            s.op_4 @= d - s.in0
-            s.op_7 @= d + i
-            s.op_8 @= d * c
+            s.op_2 @= op_1 * s.in1
+            s.op_4 @= op_2 - s.in0
+            s.op_7 @= op_4 + s.in4
+            s.op_8 @= op_7 * op_1
             s.out @= s.op_8
 
-AI
-Certainly! Please provide the Intermediate Representation (IR) code that you would like me to analyze. Once you share the IR code, I will conduct a thorough analysis and present the complete content of my analysis as your response.
+AI ANALYSIS (GROUND TRUTH CONSTRAINED)
+Understood. I will analyze only the provided IR/DFG without hallucination and provide a ground-truth constrained answer based solely on the given inputs. Please provide the necessary information for the analysis task.
