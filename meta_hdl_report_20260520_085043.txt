@@ -1,0 +1,196 @@
+Meta-HDL FP Unit Report — MXFP4
+
+=== PyMTL3 ===
+from pymtl3 import *
+
+# Arithmetic unit for MXFP4 (exp=2b, man=1b)
+
+class MXFP4ArithUnit(Component):
+    def construct(s):
+        # Input ports (4-bit MXFP4)
+        s.in0 = InPort(4)
+        s.in1 = InPort(4)
+        s.in2 = InPort(4)
+        s.in3 = InPort(4)
+        s.out  = OutPort(4)
+
+        s.op_1 = Wire(4)
+
+        @update
+        def compute():
+            s.op_1 @= s.in0 + s.in1
+
+            s.out @= s.op_1
+
+=== IR ===
+[
+  {
+    "id": "op_1",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "a",
+      "b"
+    ],
+    "output": "op_1",
+    "latency": 1
+  }
+]
+
+=== Schedule ===
+{
+  "a": 0,
+  "b": 0,
+  "op_1": 1
+}
+
+=== Pipeline ===
+{
+  "0": [
+    "a",
+    "b"
+  ],
+  "1": [
+    "op_1"
+  ]
+}
+
+=== Critical Path ===
+{
+  "a": 0,
+  "b": 0,
+  "op_1": 1
+}
+
+=== Resources ===
+{
+  "adders": 1,
+  "multipliers": 0,
+  "dividers": 0,
+  "comparators": 0,
+  "registers": 1
+}
+
+=== AI Analysis ===
+HLS Optimization Report for MXFP4 Arithmetic Unit
+
+### Bottleneck Analysis:
+Based on the provided IR structure, CRITICAL PATH, and RESOURCE information, there are a few areas for potential optimization:
+
+1. **Latency**: The current single-bit latency is acceptable but can be optimized further.
+2. **Area Utilization**: There is only one adder available, which indicates potential limitations if future designs require more complex arithmetic operations.
+
+### Optimization Suggestions:
+#### 1. Latency Reduction
+To reduce the latency, we can explore pipelined architectures or use multiple parallel adders if available:
+
+```python
+from pymtl3 import *
+
+class MXFP4AdderPipelined(Component):
+    def construct(self):
+        # Define bitwidths based on MXFP4 format
+        exp_bits = 2
+        man_bits = 1
+        total_bits = 4
+
+        # Input and output ports
+        self.a         = In(MXFP4(total_bits))
+        self.b         = In(MXFP4(total_bits))
+        self.op_1      = Out(MXFP4(total_bits))
+
+        # Extract sign, exponent, and significand from inputs
+        a_sign  = self.a[:1]
+        b_sign  = self.b[:1]
+
+        a_exp     = self.a[1:3]
+        b_exp     = self.b[1:3]
+
+        a_man     = self.a[3:]
+        b_man     = self.b[3:]
+
+        # Comparator to compare exponents (pipeline stage)
+        
+        exp_comp = Compare2(8)
+
+        with m.ComponentLevel():
+            exp_diff  = exp_comp(pipeline_step=True)(a=a_exp, b=b_exp)
+        
+        # Align significands based on the exponent difference (pipeline stage)
+        if a_exp != b_exp:
+            exponent_difference = self.exp_diff
+
+            if exponent_difference > 0:
+                mantissa_shift_left(a_man, exponent_difference, result=a_man_aligned)
+            else:
+                mantissa_shift_right(b_man, abs(exponent_difference), result=b_man_aligned)
+
+        # Add significands (pipeline stage)
+        adder = Add(2**man_bits)
+
+        with m.ComponentLevel():
+            add_result = adder(pipeline_step=True)(a=a_man if a_exp == b_exp else a_man_aligned,
+                                                 b=b_man if a_exp == b_exp else b_man_aligned)
+        
+        # Normalize the result (pipeline stage if more resources available)
+```
+
+#### 2. Area Utilization Optimization
+Although the simple adder is sufficient for current operations, if additional parallel computation units become available, they can be utilized:
+
+```python
+from pymtl3 import *
+
+class MXFP4AdderMulti(Component):
+    def construct(self):
+        num_adders = 2
+
+        # Define bitwidths based on MXFP4 format
+        exp_bits = 2
+        man_bits = 1
+        total_bits = 4
+
+        # Input and output ports
+        self.a         = [In(MXFP4(total_bits)) for _ in range(num_adders)]
+        self.b         = [In(MXFP4(total_bits)) for _ in range(num_adders)]
+        self.op_1      = Out(MXFP4(total_bits))
+
+        # Extract sign, exponent, and significand from inputs
+        man_results = []
+
+        for i in range(num_adders):
+            a_sign  = self.a[i][:1]
+            b_sign  = self.b[i][:1]
+
+            a_exp = self.a[i][1:3]
+            b_exp = self.b[i][1:3]
+
+            a_man = self.a[i][3:]
+            b_man = self.b[i][3:]
+
+            exp_comp = Compare2(8)
+
+            with m.ComponentLevel():
+                exp_diff = exp_comp(pipeline_step=True)(a=a_exp, b=b_exp)
+            
+            if a_exp != b_exp:
+                exponent_difference = self.exp_diff
+
+                if exponent_difference > 0:
+                    mantissa_shift_left(a_man, exponent_difference, result=a_man_aligned)
+                else:
+                    mantissa_shift_right(b_man, abs(exponent_difference), result=b_man_aligned)
+
+            adder = Add(2**man_bits)
+
+            with m.ComponentLevel():
+                man_result = adder(pipeline_step=True)(a=a_man if a_exp == b_exp else a_man_aligned,
+                                                     b=b_man if a_exp == b_exp else b_man_aligned)
+            
+            man_results.append(man_result)
+
+        # Combine multiple results (optional, if normalization is needed)
+```
+
+### Summary
+The optimization suggestions focus on reducing the latency through pipelining and potentially expanding the architecture to utilize additional hardware resources if they become available. Although these modifications increase complexity, they can significantly enhance performance under varying workload requirements.
