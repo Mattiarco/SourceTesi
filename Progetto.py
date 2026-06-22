@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 import networkx as nx
 
-from Tesi_interactive_input import ask_fp_format
-
 
 # 1. CONFIGURAZIONE FORMATI E LATENZE
 
