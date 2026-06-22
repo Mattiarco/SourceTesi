@@ -1054,53 +1054,44 @@ def save_outputs(
 
 # 10. MAIN
 
-def ask_fp_format(default: str = "MXFP4") -> str:
-    """
-    Chiede all'utente quale formato FP4 usare.
-    Accetta MXFP4 o NVFP4. Se l'utente preme Invio, usa il default.
-    """
-    valid_formats = list(FP_FORMATS.keys())
+def ask_fp_format() -> str:
+    print("\nSeleziona il formato FP4:")
+    print("  1) MXFP4")
+    print("  2) NVFP4")
 
     while True:
-        print("\nSeleziona il formato FP4:")
-        for idx, fmt in enumerate(valid_formats, start=1):
-            print(f"  {idx}) {fmt}")
+        choice = input("Formato [MXFP4]: ").strip().upper()
 
-        choice = input(f"Formato [{default}]: ").strip().upper()
+        if choice == "":
+            return "MXFP4"
 
-        if not choice:
-            return default
+        if choice in {"1", "MXFP4"}:
+            return "MXFP4"
 
-        # Permette sia di scrivere MXFP4/NVFP4 sia 1/2
-        if choice.isdigit():
-            index = int(choice) - 1
-            if 0 <= index < len(valid_formats):
-                return valid_formats[index]
+        if choice in {"2", "NVFP4"}:
+            return "NVFP4"
 
-        if choice in valid_formats:
-            return choice
-
-        print("Formato non valido. Inserisci MXFP4, NVFP4, 1 oppure 2.")
+        print("Formato non valido. Inserisci 1, 2, MXFP4 oppure NVFP4.")
 
 
 def ask_input_file() -> Path:
-    """
-    Chiede il file Python da analizzare/decodificare.
-    Continua a chiedere finché il file non esiste.
-    """
     while True:
-        raw_path = input("\nInserisci il percorso del file Python di input: ").strip().strip('"')
+        value = input("Inserisci il percorso del file Python di input: ").strip()
 
-        if not raw_path:
-            print("Devi inserire un percorso valido.")
+        # Rimuove eventuali virgolette copiate dal path Windows
+        value = value.strip('"').strip("'")
+
+        if not value:
+            print("Devi inserire un file di input.")
             continue
 
-        input_file = Path(raw_path)
+        input_file = Path(value)
 
-        if input_file.exists() and input_file.is_file():
+        if input_file.exists():
             return input_file
 
         print(f"File non trovato: {input_file}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1110,15 +1101,15 @@ def main():
     parser.add_argument(
         "--input",
         "-i",
-        required=True,
+        required=False,
         help="File Python da compilare",
     )
 
     parser.add_argument(
         "--format",
         "-f",
-        default="MXFP4",
         choices=list(FP_FORMATS.keys()),
+        required=False,
         help="Formato FP4 target",
     )
 
@@ -1152,20 +1143,26 @@ def main():
 
     args = parser.parse_args()
 
-    fp_format = args.format if args.format else ask_fp_format(default="MXFP4")
+    print("\n=== Enhanced Agentic Meta-HDL FP4 Compiler ===")
+
+    if args.format:
+        fp_format = args.format
+    else:
+        fp_format = ask_fp_format()
 
     if args.input:
         input_file = Path(args.input)
-        if not input_file.exists() or not input_file.is_file():
-            raise FileNotFoundError(f"File non trovato: {input_file}")
     else:
         input_file = ask_input_file()
 
     output_dir = Path(args.output)
 
+    if not input_file.exists():
+        raise FileNotFoundError(f"File non trovato: {input_file}")
+
     code = input_file.read_text(encoding="utf-8")
 
-    print("\n=== Enhanced Agentic Meta-HDL FP4 Compiler ===")
+    print("")
     print(f"Input: {input_file}")
     print(f"Format: {fp_format}")
     print(f"Tests: {args.tests}")
@@ -1252,6 +1249,7 @@ def main():
     print(f"Max abs error: {tests['max_absolute_error']:.6f}")
     print("")
     print("--- Generated files ---")
+
     for name, path in paths.items():
         print(f"{name}: {path}")
 
@@ -1261,9 +1259,5 @@ def main():
         for item in unsupported:
             print(f"- {item}")
 
-
 if __name__ == "__main__":
-    main()
-
-
-
+    main()            
