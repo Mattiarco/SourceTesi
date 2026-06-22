@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 import networkx as nx
 
+from Tesi_interactive_input import ask_fp_format
+
 
 # 1. CONFIGURAZIONE FORMATI E LATENZE
 
@@ -1054,6 +1056,54 @@ def save_outputs(
 
 # 10. MAIN
 
+def ask_fp_format(default: str = "MXFP4") -> str:
+    """
+    Chiede all'utente quale formato FP4 usare.
+    Accetta MXFP4 o NVFP4. Se l'utente preme Invio, usa il default.
+    """
+    valid_formats = list(FP_FORMATS.keys())
+
+    while True:
+        print("\nSeleziona il formato FP4:")
+        for idx, fmt in enumerate(valid_formats, start=1):
+            print(f"  {idx}) {fmt}")
+
+        choice = input(f"Formato [{default}]: ").strip().upper()
+
+        if not choice:
+            return default
+
+        # Permette sia di scrivere MXFP4/NVFP4 sia 1/2
+        if choice.isdigit():
+            index = int(choice) - 1
+            if 0 <= index < len(valid_formats):
+                return valid_formats[index]
+
+        if choice in valid_formats:
+            return choice
+
+        print("Formato non valido. Inserisci MXFP4, NVFP4, 1 oppure 2.")
+
+
+def ask_input_file() -> Path:
+    """
+    Chiede il file Python da analizzare/decodificare.
+    Continua a chiedere finché il file non esiste.
+    """
+    while True:
+        raw_path = input("\nInserisci il percorso del file Python di input: ").strip().strip('"')
+
+        if not raw_path:
+            print("Devi inserire un percorso valido.")
+            continue
+
+        input_file = Path(raw_path)
+
+        if input_file.exists() and input_file.is_file():
+            return input_file
+
+        print(f"File non trovato: {input_file}")
+
 def main():
     parser = argparse.ArgumentParser(
         description="Enhanced Agentic Meta-HDL FP4 Compiler"
@@ -1104,14 +1154,18 @@ def main():
 
     args = parser.parse_args()
 
-    input_file = Path(args.input)
+    fp_format = args.format if args.format else ask_fp_format(default="MXFP4")
+
+    if args.input:
+        input_file = Path(args.input)
+        if not input_file.exists() or not input_file.is_file():
+            raise FileNotFoundError(f"File non trovato: {input_file}")
+    else:
+        input_file = ask_input_file()
+
     output_dir = Path(args.output)
 
-    if not input_file.exists():
-        raise FileNotFoundError(f"File non trovato: {input_file}")
-
     code = input_file.read_text(encoding="utf-8")
-    fp_format = args.format
 
     print("\n=== Enhanced Agentic Meta-HDL FP4 Compiler ===")
     print(f"Input: {input_file}")
