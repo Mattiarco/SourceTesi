@@ -1,0 +1,115 @@
+[
+  {
+    "id": "op_1",
+    "type": "const",
+    "operation": "CONST",
+    "inputs": [],
+    "output": "op_1",
+    "value": 1,
+    "latency": 0
+  },
+  {
+    "id": "op_2",
+    "type": "const",
+    "operation": "CONST",
+    "inputs": [],
+    "output": "op_2",
+    "value": 2,
+    "latency": 0
+  },
+  {
+    "id": "op_3",
+    "type": "const",
+    "operation": "CONST",
+    "inputs": [],
+    "output": "op_3",
+    "value": 3,
+    "latency": 0
+  },
+  {
+    "id": "op_4",
+    "type": "const",
+    "operation": "CONST",
+    "inputs": [],
+    "output": "op_4",
+    "value": 4,
+    "latency": 0
+  },
+  {
+    "id": "op_5",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "a",
+      "op_1"
+    ],
+    "output": "op_5",
+    "latency": 2
+  },
+  {
+    "id": "op_6",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "b",
+      "op_2"
+    ],
+    "output": "op_6",
+    "latency": 2
+  },
+  {
+    "id": "op_7",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "c",
+      "op_3"
+    ],
+    "output": "op_7",
+    "latency": 2
+  },
+  {
+    "id": "op_8",
+    "type": "binary_op",
+    "operation": "Mult",
+    "inputs": [
+      "d",
+      "op_4"
+    ],
+    "output": "op_8",
+    "latency": 2
+  },
+  {
+    "id": "op_9",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "op_5",
+      "op_6"
+    ],
+    "output": "op_9",
+    "latency": 1
+  },
+  {
+    "id": "op_10",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "op_7",
+      "op_8"
+    ],
+    "output": "op_10",
+    "latency": 1
+  },
+  {
+    "id": "op_11",
+    "type": "binary_op",
+    "operation": "Add",
+    "inputs": [
+      "op_9",
+      "op_10"
+    ],
+    "output": "op_11",
+    "latency": 1
+  }
+]
