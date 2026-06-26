@@ -78,10 +78,6 @@ cinque sezioni (incluse le intestazioni in maiuscolo):
 Rispondi SOLO con queste cinque sezioni, niente altro prima o dopo.
 """
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COLORI TERMINALE
-# ─────────────────────────────────────────────────────────────────────────────
-
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
 CYAN   = "\033[36m"

@@ -1,1243 +1,980 @@
-from __future__ import annotations
-import argparse
-import ast
+#!/usr/bin/env python3
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║       Agentic Chisel MXFP4 Generator — Powered by Ollama (100% locale)     ║
+║       Soluzione AGENTICA per tesi: HDL meta-language + low-precision arith  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+ARCHITETTURA AGENTICA (5 agenti specializzati):
+
+  ┌──────────┐    ┌────────┐    ┌──────────┐    ┌────────┐    ┌────────┐
+  │ PLANNER  │ -> │ CODER  │ -> │ REVIEWER │ -> │ FIXER  │ -> │ TESTER │
+  │ (piano)  │    │(codice)│ ^  │(revisione│    │(correz.)    │(testbench)
+  └──────────┘    └────────┘ |  └──────────┘    └────────┘    └────────┘
+                             |       |               |
+                             └───────┴──── LOOP ─────┘
+                                  (max N iterazioni)
+
+  + SbtCompiler: tool non-LLM, tenta la compilazione reale con sbt
+
+DIFFERENZE rispetto alla versione precedente (script lineare):
+  • Input: specifica testuale (non più file Python già scritto)
+  • Ogni agente ha memoria conversazionale (history multi-turn)
+  • Loop automatico Review→Fix fino a codice valido o max iterazioni
+  • Compilazione reale con sbt (se installato) + revisione LLM
+  • Log JSON completo di ogni iterazione (tracciabile per la tesi)
+
+Uso:
+  python agentic_chisel_mxfp4_ollama.py
+  python agentic_chisel_mxfp4_ollama.py --spec "full adder MXFP4 4 bit"
+  python agentic_chisel_mxfp4_ollama.py --file full_adder.py --model codellama
+  python agentic_chisel_mxfp4_ollama.py --spec "moltiplicatore MXFP4" --iter 5
+
+Requisiti:
+  • Ollama in esecuzione  →  ollama serve
+  • Almeno un modello:   →  ollama pull codellama
+  • (opzionale) sbt per compilazione reale  →  https://www.scala-sbt.org
+"""
+
+import os
+import sys
 import json
-import math
-import random
+import re
+import shutil
+import subprocess
+import argparse
+import datetime
 import textwrap
-from dataclasses import dataclass
-from datetime import datetime
+import urllib.request
+import urllib.error
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
-import networkx as nx
 
+# CONFIGURAZIONE
 
-# 1. CONFIGURAZIONE FORMATI E LATENZE
+DEFAULT_HOST   = "http://localhost:11434"
+MAX_FIX_ITER   = 3      # iterazioni default del loop review/fix
+OLLAMA_TIMEOUT = 600    # secondi timeout per ogni chiamata LLM
 
-LATENCY_TABLE = {
-    "Add": 1,
-    "Sub": 1,
-    "Mult": 2,
-    "Div": 4,
-    "Gt": 1,
-    "Lt": 1,
-    "Eq": 1,
-    "NotEq": 1,
-    "CONST": 0,
-    "INPUT": 0,
-    "NEG": 1,
+RECOMMENDED_MODELS = [
+    "codellama",
+    "deepseek-coder",
+    "deepseek-r1",
+    "qwen2.5-coder",
+    "llama3.1",
+    "llama3",
+    "mistral",
+    "phi4",
+]
+
+# SYSTEM PROMPT — uno per agente, ognuno è uno specialista diverso
+
+SYSTEM_PLANNER = """\
+Sei un esperto di architetture hardware digitale e aritmetica a bassa precisione.
+Ricevi una specifica testuale di un'unità aritmetica da implementare in Chisel 3
+con formato numerico MXFP4.
+
+CONTESTO MXFP4:
+  • Formato E2M1: 4 bit totali
+      bit[3]   = segno (0=positivo, 1=negativo)
+      bit[2:1] = esponente (2 bit, bias=1)
+      bit[0]   = mantissa (1 bit)
+  • Shared exponent per blocchi di 32 elementi (OCP MX Specification v1.0)
+  • Usato in acceleratori ML per ridurre area e banda
+
+Il tuo compito è produrre un piano di implementazione strutturato in JSON.
+Rispondi SOLO con il JSON valido. Nessun testo prima o dopo. Nessun markdown.
+
+Schema JSON richiesto:
+{
+  "nome_modulo": "NomeInPascalCase",
+  "tipo": "combinatorio|sequenziale",
+  "descrizione": "descrizione funzionale completa",
+  "ingressi": [
+    {"nome": "a",   "tipo": "MXFP4|UInt|SInt|Bool", "bit": 4, "descrizione": "..."}
+  ],
+  "uscite": [
+    {"nome": "sum", "tipo": "MXFP4|UInt|SInt|Bool", "bit": 4, "descrizione": "..."}
+  ],
+  "segnali_interni": [
+    {"nome": "carry", "tipo": "UInt", "bit": 1, "descrizione": "..."}
+  ],
+  "passi_algoritmo": [
+    "1. Estrai segno, esponente e mantissa dagli ingressi",
+    "2. Allinea gli esponenti",
+    "..."
+  ],
+  "bundle_mxfp4_necessario": true,
+  "note_mxfp4": "descrizione delle scelte architetturali MXFP4"
 }
+"""
 
-FP_FORMATS = {
-    "MXFP4": {
-        "exp_bits": 2,
-        "man_bits": 1,
-        "total_bits": 4,
-        "block_size": 32,
-        "scale_type": "power_of_two",
-        "description": "MXFP4-like simplified E2M1 block floating-point format",
-    },
-    "NVFP4": {
-        "exp_bits": 2,
-        "man_bits": 1,
-        "total_bits": 4,
-        "block_size": 16,
-        "scale_type": "fp8_like",
-        "description": "NVFP4-like simplified E2M1 format with local scaling model",
-    },
-}
+SYSTEM_CODER = """\
+Sei un esperto di Chisel 3 (Scala) e di formati numerici a bassa precisione.
+Devi implementare un'unità aritmetica hardware in Chisel 3 con supporto MXFP4.
 
-# 2. CLASSE DI CODIFICA FP4
+REGOLE OBBLIGATORIE:
+1. Prima riga: import chisel3._
+   Seconda riga: import chisel3.util._
+2. Definisci SEMPRE il Bundle MXFP4:
+     class MXFP4 extends Bundle {
+       val sign = Bool()
+       val exp  = UInt(2.W)
+       val mant = UInt(1.W)
+     }
+3. Ogni modulo Chisel estende Module e ha un val io = IO(new Bundle { ... })
+4. Usa := per assegnazioni, non =
+5. I segnali Wire si dichiarano con: val nome = Wire(UInt(N.W))
+6. Usa nomi inglesi snake_case per segnali e moduli PascalCase
+7. Commenta ogni blocco logico in italiano (utile per la tesi)
+8. Nessuna libreria esterna oltre a chisel3 standard
+9. Il codice deve essere COMPLETO e COMPILABILE
 
-class FP4Codec:
+Rispondi con SOLO il codice Scala/Chisel.
+Non usare markdown (no ```), nessun testo prima o dopo il codice.
+"""
+
+SYSTEM_REVIEWER = """\
+Sei un revisore esperto di codice Chisel 3 per unità aritmetiche MXFP4.
+Ricevi del codice Chisel 3 e devi identificare errori precisi.
+
+CHECKLIST DA VERIFICARE:
+  [ ] Import: chisel3._ e chisel3.util._ presenti
+  [ ] Bundle MXFP4 definito con: sign (Bool), exp (UInt(2.W)), mant (UInt(1.W))
+  [ ] Ogni modulo estende Module
+  [ ] IO Bundle dichiarato con val io = IO(new Bundle { ... })
+  [ ] Assegnazioni usano := non =
+  [ ] Wire dichiarati prima dell'uso
+  [ ] Parentesi graffe bilanciate
+  [ ] Nessuna sintassi Scala non supportata in Chisel 3
+  [ ] Logica MXFP4 corretta (estrazione bit, allineamento esponenti, ecc.)
+  [ ] Nessun import o riferimento a librerie inesistenti
+
+Se il codice supera tutti i controlli, rispondi ESATTAMENTE (solo questo):
+PASS
+
+Se ci sono problemi, rispondi ESATTAMENTE in questo formato:
+ISSUES
+- [riga o blocco] descrizione problema 1
+- [riga o blocco] descrizione problema 2
+...
+"""
+
+SYSTEM_FIXER = """\
+Sei un esperto Chisel 3 che corregge codice hardware con errori.
+Ricevi il codice difettoso e una lista di issues da risolvere.
+
+REGOLE:
+1. Correggi TUTTI gli errori elencati senza eccezioni
+2. Non introdurre nuovi errori
+3. Mantieni la stessa logica funzionale dell'originale
+4. Il codice output deve essere completo (non troncare)
+5. Rispetta le stesse regole del Coder:
+   - import chisel3._ e chisel3.util._
+   - Bundle MXFP4 con sign/exp/mant
+   - := per assegnazioni
+   - Commenti in italiano
+
+Rispondi con SOLO il codice Scala/Chisel corretto e completo.
+Nessun markdown, nessun testo aggiuntivo.
+"""
+
+SYSTEM_TESTER = """\
+Sei un esperto di ChiselTest e ScalaTest per la verifica di circuiti hardware.
+Ricevi un modulo Chisel MXFP4 e devi generare un testbench completo.
+
+STRUTTURA OBBLIGATORIA:
+  import chisel3._
+  import chiseltest._
+  import org.scalatest.flatspec.AnyFlatSpec
+
+  class NomeModuloTest extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "NomeModulo"
+
+    it should "descrizione test" in {
+      test(new NomeModulo) { dut =>
+        // test cases
+      }
+    }
+  }
+
+CASI DA TESTARE:
+  • Caso base (valori tipici)
+  • Zero (0x0)
+  • Valore massimo rappresentabile in MXFP4
+  • Valori negativi (se il modulo li supporta)
+  • Overflow/underflow
+  • Simmetria (a op b == b op a per operazioni commutative)
+
+Ricorda: in MXFP4 E2M1 il valore massimo è 0b0111 = +6.0
+
+Rispondi con SOLO il codice Scala del testbench.
+Nessun markdown, nessun testo aggiuntivo.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COLORI TERMINALE
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[36m"
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+DIM    = "\033[2m"
+BLUE   = "\033[34m"
+MAGENTA = "\033[35m"
+
+def banner():
+    print(f"""\n{CYAN}{BOLD}\
+╔══════════════════════════════════════════════════════════════════╗
+║  🤖  Agentic Chisel MXFP4 Generator  (Ollama — 100% locale)    ║
+║  Planner → Coder → [Reviewer ⟷ Fixer]* → Tester → Output      ║
+╚══════════════════════════════════════════════════════════════════╝{RESET}""")
+
+def agent_step(agent_name: str, desc: str):
+    print(f"\n{MAGENTA}{BOLD}[{agent_name.upper()}]{RESET} {desc}")
+
+def step(n: int, msg: str):
+    print(f"\n{CYAN}{BOLD}[STEP {n}]{RESET} {msg}")
+
+def ok(msg: str):
+    print(f"  {GREEN}✔{RESET}  {msg}")
+
+def warn(msg: str):
+    print(f"  {YELLOW}⚠{RESET}  {msg}")
+
+def err(msg: str):
+    print(f"  {RED}✘{RESET}  {msg}", file=sys.stderr)
+
+def info(msg: str):
+    print(f"  {BLUE}ℹ{RESET}  {msg}")
+
+def hr():
+    print(f"{DIM}{'─' * 68}{RESET}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OLLAMA — utility HTTP
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ollama_get(url: str, timeout: int = 5):
+    """GET su Ollama, ritorna il JSON o None se non raggiungibile."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def ollama_chat(host: str, model: str, system_prompt: str,
+                history: list[dict], timeout: int = OLLAMA_TIMEOUT) -> str:
     """
-    Golden model software semplificato per valori E2M1 a 4 bit.
+    Chiama l'endpoint /api/chat di Ollama con history multi-turn.
+    Il system prompt viene passato nel campo 'system' (non nella history)
+    per separare istruzioni permanenti dal dialogo.
+    """
+    payload = {
+        "model":   model,
+        "stream":  False,
+        "system":  system_prompt,
+        "options": {
+            "temperature": 0.1,    # bassa: output deterministico per codice
+            "num_predict": 4096,
+        },
+        "messages": history,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req  = urllib.request.Request(
+        f"{host}/api/chat", data=body,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="replace")
+        err(f"HTTP {e.code}: {body_err}")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        err(f"Connessione persa: {e.reason}")
+        sys.exit(1)
 
-    Struttura:
-    - 1 bit segno
-    - 2 bit esponente
-    - 1 bit mantissa
+    return data.get("message", {}).get("content", "").strip()
 
-    Nota:
-    Questo è un modello sperimentale per:
-    - quantizzazione
-    - dequantizzazione
-    - confronto tra output Python e output quantizzato
-    - valutazione dell'errore numerico
 
-    Il set di valori base usato è coerente con una rappresentazione FP4 E2M1
-    semplificata:
-        0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6
+# ─────────────────────────────────────────────────────────────────────────────
+# CLASSE BASE AGENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Agent:
+    """
+    Agente LLM con memoria conversazionale (history multi-turn).
+
+    Ogni agente mantiene la propria history separata, quindi Fixer
+    "ricorda" le iterazioni precedenti e non ripete gli stessi errori.
+    Il system prompt è fisso e descrive il ruolo dell'agente.
     """
 
-    POSITIVE_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+    def __init__(self, name: str, system_prompt: str, host: str, model: str):
+        self.name          = name
+        self.system_prompt = system_prompt
+        self.host          = host
+        self.model         = model
+        self.history: list[dict] = []   # memoria conversazionale
 
-    def __init__(self, fp_format: str):
-        if fp_format not in FP_FORMATS:
-            raise ValueError(f"Formato non supportato: {fp_format}")
-        self.fp_format = fp_format
-        self.config = FP_FORMATS[fp_format]
+    def run(self, user_message: str) -> str:
+        """Invia un messaggio, aggiorna la history, ritorna la risposta."""
+        self.history.append({"role": "user", "content": user_message})
+        info(f"Agente {BOLD}{self.name}{RESET} in elaborazione…")
 
-    def encode_scalar(self, value: float, scale: float = 1.0) -> int:
-        """
-        Codifica un valore reale in un codice FP4 a 4 bit.
-        Il valore viene prima diviso per lo scale.
-        """
-        if scale == 0:
-            scale = 1.0
-
-        normalized = value / scale
-        sign_bit = 1 if normalized < 0 else 0
-        abs_value = abs(normalized)
-
-        nearest_index = min(
-            range(len(self.POSITIVE_VALUES)),
-            key=lambda i: abs(self.POSITIVE_VALUES[i] - abs_value),
+        t_start  = datetime.datetime.now()
+        response = ollama_chat(
+            self.host, self.model, self.system_prompt, self.history
         )
+        elapsed  = (datetime.datetime.now() - t_start).total_seconds()
 
-        # 3 bit inferiori = indice del valore positivo
-        code = (sign_bit << 3) | nearest_index
-        return code & 0xF
+        self.history.append({"role": "assistant", "content": response})
+        ok(f"{self.name} risposta in {elapsed:.1f}s  "
+           f"({len(response)} caratteri)")
+        return response
 
-    def decode_scalar(self, code: int, scale: float = 1.0) -> float:
-        """
-        Decodifica un codice FP4 a 4 bit in valore reale.
-        """
-        code = code & 0xF
-        sign = -1.0 if ((code >> 3) & 0x1) else 1.0
-        index = code & 0x7
-        return sign * self.POSITIVE_VALUES[index] * scale
+    def reset_history(self):
+        """Azzera la memoria (utile tra task indipendenti)."""
+        self.history = []
 
-    def compute_scale(self, values: List[float]) -> float:
-        """
-        Calcola un fattore di scala semplificato per blocco.
 
-        MXFP4:
-            approssimazione a potenza di due.
+# ─────────────────────────────────────────────────────────────────────────────
+# SBT COMPILER TOOL (non-LLM)
+# ─────────────────────────────────────────────────────────────────────────────
 
-        NVFP4:
-            approssimazione più fine, per simulare uno scaling locale più accurato.
-        """
-        if not values:
-            return 1.0
-
-        max_abs = max(abs(v) for v in values)
-        if max_abs == 0:
-            return 1.0
-
-        max_representable = max(self.POSITIVE_VALUES)
-        raw_scale = max_abs / max_representable
-
-        if self.config["scale_type"] == "power_of_two":
-            exponent = round(math.log2(raw_scale))
-            return 2.0 ** exponent
-
-        # Modello semplificato NVFP4: scala più granulare.
-        # Non è FP8 E4M3 completo, ma è più fine della sola potenza di due.
-        return round(raw_scale * 16.0) / 16.0 or 1.0
-
-    def quantize_block(self, values: List[float]) -> Tuple[List[int], float]:
-        """
-        Quantizza un blocco di valori.
-        """
-        scale = self.compute_scale(values)
-        codes = [self.encode_scalar(v, scale) for v in values]
-        return codes, scale
-
-    def dequantize_block(self, codes: List[int], scale: float) -> List[float]:
-        """
-        Dequantizza un blocco di codici FP4.
-        """
-        return [self.decode_scalar(c, scale) for c in codes]
-
-    def quantize_scalar_auto(self, value: float) -> Tuple[int, float, float]:
-        """
-        Quantizzazione singola con scala calcolata sul singolo valore.
-        Restituisce:
-        - codice FP4
-        - scala
-        - valore dequantizzato
-        """
-        codes, scale = self.quantize_block([value])
-        decoded = self.dequantize_block(codes, scale)[0]
-        return codes[0], scale, decoded
-
-# 3. IR BUILDER
-
-class IRBuilder(ast.NodeVisitor):
+class SbtCompiler:
     """
-    Converte codice Python in:
-    - Intermediate Representation
-    - Data Flow Graph
-    - mappa variabili
-    - valore di ritorno
+    Tool di compilazione reale: scrive il codice in una dir temporanea,
+    lancia 'sbt compile' e cattura gli errori.
 
-    Supporta:
-    - assegnazioni semplici
-    - return
-    - operazioni binarie: +, -, *, /
-    - confronti semplici
-    - costanti
-    - variabili a, b, c, d
-    - unary minus
+    Se sbt non è installato, salta silenziosamente (solo revisione LLM).
+    Questo rende il tool opzionale senza interrompere il workflow.
     """
 
     def __init__(self):
-        self.ir: List[Dict[str, Any]] = []
-        self.graph = nx.DiGraph()
-        self.op_id = 0
-        self.var_map: Dict[str, str] = {}
-        self.input_ports = {"a", "b", "c", "d"}
-        self.const_cache: Dict[str, str] = {}
-        self.return_value: Optional[str] = None
-        self.unsupported_nodes: List[str] = []
+        self.available = shutil.which("sbt") is not None
 
-        for port in self.input_ports:
-            self.graph.add_node(
-                port,
-                id=port,
-                type="input",
-                operation="INPUT",
-                latency=0,
+    def compile(self, chisel_code: str, stem: str) -> tuple[bool, str]:
+        """
+        Tenta la compilazione con sbt.
+        Ritorna (successo: bool, output_errori: str).
+        """
+        if not self.available:
+            return True, "sbt non trovato — compilazione reale saltata"
+
+        tmp = Path(f"/tmp/chisel_check_{stem}_{datetime.datetime.now().strftime('%H%M%S%f')}")
+        tmp.mkdir(parents=True, exist_ok=True)
+
+        # Progetto SBT minimale
+        (tmp / "build.sbt").write_text(
+            'scalaVersion := "2.13.12"\n'
+            'libraryDependencies += "org.chipsalliance" %% "chisel" % "6.5.0"\n'
+            'addCompilerPlugin('
+            '"org.chipsalliance" % "chisel-plugin" % "6.5.0" cross CrossVersion.full)\n',
+            encoding="utf-8"
+        )
+        src = tmp / "src" / "main" / "scala"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / f"{stem}.scala").write_text(chisel_code, encoding="utf-8")
+
+        try:
+            result = subprocess.run(
+                ["sbt", "compile"],
+                cwd=tmp, capture_output=True, text=True, timeout=180
             )
+            output  = (result.stdout + result.stderr).strip()
+            success = result.returncode == 0
+            return success, output
 
-    def _new_id(self) -> str:
-        self.op_id += 1
-        return f"op_{self.op_id}"
-
-    def _resolve(self, name: str) -> str:
-        if name in self.var_map:
-            return self.var_map[name]
-        if name in self.input_ports:
-            return name
-        return name
-
-    def _const(self, value: Any) -> str:
-        if not isinstance(value, (int, float, bool)):
-            raise ValueError(f"Costante non numerica non supportata: {value}")
-
-        key = f"const_{value}"
-        if key in self.const_cache:
-            return self.const_cache[key]
-
-        oid = self._new_id()
-        self.const_cache[key] = oid
-
-        node = {
-            "id": oid,
-            "type": "const",
-            "operation": "CONST",
-            "inputs": [],
-            "output": oid,
-            "value": value,
-            "latency": LATENCY_TABLE["CONST"],
-        }
-
-        self.ir.append(node)
-        self.graph.add_node(oid, **node)
-        return oid
-
-    def _add_node(
-        self,
-        op_type: str,
-        operation: str,
-        inputs: List[str],
-        latency: Optional[int] = None,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        oid = self._new_id()
-
-        node = {
-            "id": oid,
-            "type": op_type,
-            "operation": operation,
-            "inputs": inputs,
-            "output": oid,
-            "latency": latency if latency is not None else LATENCY_TABLE.get(operation, 1),
-        }
-
-        if extra:
-            node.update(extra)
-
-        self.ir.append(node)
-        self.graph.add_node(oid, **node)
-
-        for inp in inputs:
-            if isinstance(inp, str):
-                self.graph.add_node(inp)
-                self.graph.add_edge(inp, oid)
-
-        return oid
-
-    def extract(self, node: ast.AST) -> str:
-        if isinstance(node, ast.Name):
-            return self._resolve(node.id)
-
-        if isinstance(node, ast.Constant):
-            return self._const(node.value)
-
-        if isinstance(node, ast.BinOp):
-            left = self.extract(node.left)
-            right = self.extract(node.right)
-            op = type(node.op).__name__
-
-            if op not in {"Add", "Sub", "Mult", "Div"}:
-                self.unsupported_nodes.append(f"Unsupported BinOp: {op}")
-
-            return self._add_node(
-                op_type="binary_op",
-                operation=op,
-                inputs=[left, right],
-                latency=LATENCY_TABLE.get(op, 1),
-            )
-
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            operand = self.extract(node.operand)
-            zero = self._const(0)
-            return self._add_node(
-                op_type="binary_op",
-                operation="Sub",
-                inputs=[zero, operand],
-                latency=LATENCY_TABLE["Sub"],
-            )
-
-        if isinstance(node, ast.Compare):
-            if len(node.ops) != 1 or len(node.comparators) != 1:
-                self.unsupported_nodes.append("Only single comparisons are supported")
-
-            left = self.extract(node.left)
-            right = self.extract(node.comparators[0])
-            op = type(node.ops[0]).__name__
-
-            return self._add_node(
-                op_type="compare",
-                operation=op,
-                inputs=[left, right],
-                latency=LATENCY_TABLE.get(op, 1),
-            )
-
-        dumped = ast.dump(node)
-        self.unsupported_nodes.append(dumped)
-        return dumped
-
-    def visit_Assign(self, node: ast.Assign):
-        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-            self.unsupported_nodes.append("Only simple assignments are supported")
-            return
-
-        target = node.targets[0].id
-        self.var_map[target] = self.extract(node.value)
-
-    def visit_Return(self, node: ast.Return):
-        self.return_value = self.extract(node.value)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef):
-        for stmt in node.body:
-            self.visit(stmt)
+        except subprocess.TimeoutExpired:
+            return False, "sbt compile timeout (>180s)"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
-def build_ir(code: str) -> Tuple[List[Dict[str, Any]], nx.DiGraph, Dict[str, str], Optional[str], List[str]]:
-    builder = IRBuilder()
-    tree = ast.parse(code)
-    builder.visit(tree)
-    return builder.ir, builder.graph, builder.var_map, builder.return_value, builder.unsupported_nodes
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 0 — Acquisizione specifica
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-# 4. ANALISI HLS
-
-def critical_path(graph: nx.DiGraph) -> Dict[str, int]:
+def get_specification(file_arg: str | None, spec_arg: str | None) -> str:
     """
-    Calcola la distanza massima in termini di latenza.
+    Ottiene la specifica dell'unità da implementare.
+    Tre modalità (priorità: spec_arg > file_arg > interattivo):
+      1. --spec "testo"     — specifica testuale diretta
+      2. --file file.py     — usa il codice Python come contesto
+      3. interattivo        — chiede all'utente
     """
-    dist: Dict[str, int] = {}
-
-    for n in nx.topological_sort(graph):
-        lat = graph.nodes[n].get("latency", 0)
-        preds = list(graph.predecessors(n))
-        dist[n] = lat + (max(dist[p] for p in preds) if preds else 0)
-
-    return dist
-
-
-def schedule_asap(graph: nx.DiGraph) -> Dict[str, int]:
-    """
-    ASAP scheduling: assegna ogni nodo al primo ciclo disponibile
-    in base alle dipendenze dati.
-    """
-    sch: Dict[str, int] = {}
-
-    for n in nx.topological_sort(graph):
-        preds = list(graph.predecessors(n))
-        base = max((sch[p] for p in preds), default=0)
-        sch[n] = base + graph.nodes[n].get("latency", 0)
-
-    return sch
-
-
-def pipeline_stages(schedule: Dict[str, int]) -> Dict[int, List[str]]:
-    stages: Dict[int, List[str]] = {}
-
-    for node, stage in schedule.items():
-        stages.setdefault(stage, []).append(node)
-
-    return dict(sorted(stages.items(), key=lambda x: x[0]))
-
-
-def resource_estimate(ir: List[Dict[str, Any]], schedule: Dict[str, int]) -> Dict[str, Any]:
-    """
-    Stima:
-    - risorse totali
-    - risorse massime per stage
-    - registri stimati
-    """
-    total = {
-        "adders": 0,
-        "subtractors": 0,
-        "multipliers": 0,
-        "dividers": 0,
-        "comparators": 0,
-        "const_units": 0,
-        "registers_estimated": len(ir),
-    }
-
-    per_stage: Dict[int, Dict[str, int]] = {}
-
-    def ensure_stage(stage: int):
-        if stage not in per_stage:
-            per_stage[stage] = {
-                "adders": 0,
-                "subtractors": 0,
-                "multipliers": 0,
-                "dividers": 0,
-                "comparators": 0,
-            }
-
-    for node in ir:
-        op = node["operation"]
-        stage = schedule.get(node["id"], 0)
-        ensure_stage(stage)
-
-        if node["type"] == "const":
-            total["const_units"] += 1
-
-        elif node["type"] == "binary_op":
-            if op == "Add":
-                total["adders"] += 1
-                per_stage[stage]["adders"] += 1
-            elif op == "Sub":
-                total["subtractors"] += 1
-                per_stage[stage]["subtractors"] += 1
-            elif op == "Mult":
-                total["multipliers"] += 1
-                per_stage[stage]["multipliers"] += 1
-            elif op == "Div":
-                total["dividers"] += 1
-                per_stage[stage]["dividers"] += 1
-
-        elif node["type"] == "compare":
-            total["comparators"] += 1
-            per_stage[stage]["comparators"] += 1
-
-    peak = {
-        "peak_adders": max((v["adders"] for v in per_stage.values()), default=0),
-        "peak_subtractors": max((v["subtractors"] for v in per_stage.values()), default=0),
-        "peak_multipliers": max((v["multipliers"] for v in per_stage.values()), default=0),
-        "peak_dividers": max((v["dividers"] for v in per_stage.values()), default=0),
-        "peak_comparators": max((v["comparators"] for v in per_stage.values()), default=0),
-    }
-
-    return {
-        "total_operations": total,
-        "peak_parallel_resources": peak,
-        "per_stage": per_stage,
-    }
-
-
-# 5. INTERPRETE IR E TEST 
-
-def evaluate_ir_float(
-    ir: List[Dict[str, Any]],
-    inputs: Dict[str, float],
-    return_value: Optional[str],
-) -> float:
-    """
-    Esegue la IR in floating-point Python standard.
-    """
-    env: Dict[str, Any] = dict(inputs)
-
-    for node in ir:
-        oid = node["id"]
-        op = node["operation"]
-
-        if node["type"] == "const":
-            env[oid] = node["value"]
-
-        elif node["type"] == "binary_op":
-            a = env[node["inputs"][0]]
-            b = env[node["inputs"][1]]
-
-            if op == "Add":
-                env[oid] = a + b
-            elif op == "Sub":
-                env[oid] = a - b
-            elif op == "Mult":
-                env[oid] = a * b
-            elif op == "Div":
-                env[oid] = a / b if b != 0 else 0.0
-            else:
-                raise ValueError(f"Operazione non supportata: {op}")
-
-        elif node["type"] == "compare":
-            a = env[node["inputs"][0]]
-            b = env[node["inputs"][1]]
-
-            if op == "Gt":
-                env[oid] = float(a > b)
-            elif op == "Lt":
-                env[oid] = float(a < b)
-            elif op == "Eq":
-                env[oid] = float(a == b)
-            elif op == "NotEq":
-                env[oid] = float(a != b)
-            else:
-                raise ValueError(f"Confronto non supportato: {op}")
-
-    if return_value is None:
-        raise ValueError("Nessun return individuato nel codice Python")
-
-    return float(env[return_value])
-
-
-def evaluate_ir_quantized(
-    ir: List[Dict[str, Any]],
-    inputs: Dict[str, float],
-    return_value: Optional[str],
-    codec: FP4Codec,
-) -> float:
-    """
-    Esegue la IR con quantizzazione FP4 dopo ogni operazione.
-    Questo simula l'errore introdotto da unità a precisione ridotta.
-    """
-    env: Dict[str, Any] = {}
-
-    for k, v in inputs.items():
-        _, _, qv = codec.quantize_scalar_auto(v)
-        env[k] = qv
-
-    for node in ir:
-        oid = node["id"]
-        op = node["operation"]
-
-        if node["type"] == "const":
-            _, _, qv = codec.quantize_scalar_auto(float(node["value"]))
-            env[oid] = qv
-
-        elif node["type"] == "binary_op":
-            a = env[node["inputs"][0]]
-            b = env[node["inputs"][1]]
-
-            if op == "Add":
-                raw = a + b
-            elif op == "Sub":
-                raw = a - b
-            elif op == "Mult":
-                raw = a * b
-            elif op == "Div":
-                raw = a / b if b != 0 else 0.0
-            else:
-                raise ValueError(f"Operazione non supportata: {op}")
-
-            _, _, qv = codec.quantize_scalar_auto(raw)
-            env[oid] = qv
-
-        elif node["type"] == "compare":
-            a = env[node["inputs"][0]]
-            b = env[node["inputs"][1]]
-
-            if op == "Gt":
-                env[oid] = float(a > b)
-            elif op == "Lt":
-                env[oid] = float(a < b)
-            elif op == "Eq":
-                env[oid] = float(a == b)
-            elif op == "NotEq":
-                env[oid] = float(a != b)
-
-    if return_value is None:
-        raise ValueError("Nessun return individuato nel codice Python")
-
-    return float(env[return_value])
-
-
-def generate_test_vectors(
-    ir: List[Dict[str, Any]],
-    return_value: Optional[str],
-    fp_format: str,
-    n_tests: int = 32,
-    seed: int = 42,
-    input_ports: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """
-    Genera test casuali e confronta:
-    - output Python float
-    - output quantizzato FP4
-    """
-    random.seed(seed)
-    codec = FP4Codec(fp_format)
-
-    if input_ports is None:
-        input_ports = ["a", "b", "c", "d"]
-
-    tests = []
-    abs_errors = []
-    rel_errors = []
-
-    for _ in range(n_tests):
-        inputs = {
-            port: random.uniform(-4.0, 4.0)
-            for port in input_ports
-        }
-
-        float_out = evaluate_ir_float(ir, inputs, return_value)
-        fp4_out = evaluate_ir_quantized(ir, inputs, return_value, codec)
-
-        abs_error = abs(float_out - fp4_out)
-        rel_error = abs_error / (abs(float_out) + 1e-9)
-
-        abs_errors.append(abs_error)
-        rel_errors.append(rel_error)
-
-        tests.append({
-            "inputs": inputs,
-            "float_output": float_out,
-            "fp4_output": fp4_out,
-            "absolute_error": abs_error,
-            "relative_error": rel_error,
-        })
-
-    return {
-        "fp_format": fp_format,
-        "n_tests": n_tests,
-        "mean_absolute_error": sum(abs_errors) / len(abs_errors) if abs_errors else 0.0,
-        "max_absolute_error": max(abs_errors) if abs_errors else 0.0,
-        "mean_relative_error": sum(rel_errors) / len(rel_errors) if rel_errors else 0.0,
-        "max_relative_error": max(rel_errors) if rel_errors else 0.0,
-        "tests": tests,
-    }
-
-
-# 6. GENERAZIONE PYMTL3 
-
-def generate_pymtl(
-    ir: List[Dict[str, Any]],
-    var_map: Dict[str, str],
-    return_value: Optional[str],
-    fp_format: str = "MXFP4",
-    pipelined: bool = False,
-) -> str:
-    """
-    Genera codice PyMTL3.
-
-    """
-    fmt = FP_FORMATS[fp_format]
-    bits = fmt["total_bits"]
-
-    port_map = {
-        "a": "s.in0",
-        "b": "s.in1",
-        "c": "s.in2",
-        "d": "s.in3",
-    }
-
-    def resolve(x: Any) -> str:
-        if isinstance(x, str):
-            if x.startswith("op_"):
-                return f"s.{x}"
-            if x in port_map:
-                return port_map[x]
-            mapped = var_map.get(x)
-            if mapped:
-                return resolve(mapped)
-        return str(x)
-
-    op_expr = {
-        "Add": "{a} + {b}",
-        "Sub": "{a} - {b}",
-        "Mult": "{a} * {b}",
-        "Div": "{a} // {b}",
-        "Gt": "{a} > {b}",
-        "Lt": "{a} < {b}",
-        "Eq": "{a} == {b}",
-        "NotEq": "{a} != {b}",
-    }
-
-    class_name = f"{fp_format}ArithUnit"
-
-    lines = [
-        "from pymtl3 import *",
-        "",
-        f"# Generated by Agentic Meta-HDL FP4 Compiler",
-        f"# Format: {fp_format}",
-        f"# Datapath width: {bits} bit",
-        "",
-        f"class {class_name}(Component):",
-        "    def construct(s):",
-        f"        s.in0 = InPort({bits})",
-        f"        s.in1 = InPort({bits})",
-        f"        s.in2 = InPort({bits})",
-        f"        s.in3 = InPort({bits})",
-        f"        s.out = OutPort({bits})",
-        "",
-    ]
-
-    for node in ir:
-        width = 1 if node["type"] == "compare" else bits
-        lines.append(f"        s.{node['id']} = Wire({width})")
-
-    lines.extend([
-        "",
-        "        @update",
-        "        def compute():",
-    ])
-
-    for node in ir:
-        oid = node["id"]
-
-        if node["type"] == "const":
-            value = int(node["value"]) & ((1 << bits) - 1)
-            lines.append(f"            s.{oid} @= {value}")
-
-        elif node["type"] in {"binary_op", "compare"}:
-            op = node["operation"]
-            if op not in op_expr:
-                lines.append(f"            # Unsupported operation: {op}")
-                continue
-
-            a = resolve(node["inputs"][0])
-            b = resolve(node["inputs"][1])
-            expr = op_expr[op].format(a=a, b=b)
-
-            if node["type"] == "binary_op":
-                mask = (1 << bits) - 1
-                lines.append(f"            s.{oid} @= ({expr}) & {mask}")
-            else:
-                lines.append(f"            s.{oid} @= {expr}")
-
-    if return_value:
-        lines.append("")
-        lines.append(f"            s.out @= {resolve(return_value)}")
-    else:
-        lines.append("")
-        lines.append("            s.out @= 0")
-
-    return "\n".join(lines)
-
-
-# 7. ANALISI AGENTICA 
-
-def run_optional_crew_analysis(
-    fp_format: str,
-    ir: List[Dict[str, Any]],
-    schedule: Dict[str, int],
-    pipeline: Dict[int, List[str]],
-    critical: Dict[str, int],
-    resources: Dict[str, Any],
-    tests: Dict[str, Any],
-) -> str:
-    """
-    Esegue CrewAI solo se installato e richiesto.
-    Se CrewAI non è disponibile, restituisce una valutazione deterministica.
-    """
-    try:
-        from crewai import Agent, Task, Crew, Process
-    except Exception as exc:
-        return deterministic_architectural_review(
-            fp_format, ir, schedule, pipeline, critical, resources, tests,
-            note=f"CrewAI non disponibile: {exc}",
+    step(0, "Acquisizione della specifica")
+
+    if spec_arg:
+        ok(f"Specifica da argomento CLI ({len(spec_arg)} caratteri)")
+        return spec_arg
+
+    if file_arg:
+        path = Path(file_arg)
+        if not path.exists():
+            err(f"File non trovato: {path}")
+            sys.exit(1)
+        source = path.read_text(encoding="utf-8")
+        ok(f"File caricato come contesto: {path.name}  "
+           f"({source.count(chr(10))+1} righe)")
+        return (
+            "Implementa in Chisel 3 con formato MXFP4 (E2M1, 4 bit) "
+            "un'unità aritmetica hardware funzionalmente equivalente "
+            f"al seguente codice Python:\n\n```python\n{source}\n```\n\n"
+            "Adatta ingressi, uscite e logica al dominio hardware/MXFP4."
         )
 
-    llm = "ollama/qwen2.5-coder"
+    # Modalità interattiva
+    print(f"""
+  Descrivi l'unità aritmetica da implementare in Chisel + MXFP4.
 
-    designer = Agent(
-        role="Meta-HDL FP4 Unit Designer",
-        goal="Analyze the generated Meta-HDL datapath and propose realistic FP4 hardware improvements.",
-        backstory="Expert in Meta-HDL, PyMTL3, HLS, reduced precision arithmetic and RISC-V coprocessors.",
-        llm=llm,
-        verbose=True,
-    )
-
-    analyzer = Agent(
-        role="HLS Validation Analyzer",
-        goal="Check scheduling, resource usage and test results without inventing unsupported claims.",
-        backstory="Compiler backend specialist focused on dataflow graphs, scheduling and test-driven validation.",
-        llm=llm,
-        verbose=True,
-    )
-
-    task1 = Task(
-        description=f"""
-Analyze this {fp_format} prototype Meta-HDL arithmetic unit.
-
-IR:
-{json.dumps(ir, indent=2)}
-
-Schedule:
-{json.dumps(schedule, indent=2)}
-
-Pipeline:
-{json.dumps(pipeline, indent=2)}
-
-Resources:
-{json.dumps(resources, indent=2)}
-
-Validation:
-{json.dumps({k: v for k, v in tests.items() if k != "tests"}, indent=2)}
+  Esempi di specifiche:
+    • "Implementa un full adder 1-bit con ingressi e uscite MXFP4 E2M1"
+    • "Crea un moltiplicatore che moltiplica due numeri MXFP4 a 4 bit"
+    • "ALU MXFP4 con addizione e sottrazione, gestione overflow"
+    • "Ripple-carry adder 4-bit con rappresentazione MXFP4"
+""")
+    spec = input(f"  {BOLD}Descrizione dell'unità:{RESET} ").strip()
+    if not spec:
+        err("Specifica vuota.")
+        sys.exit(1)
+    ok(f"Specifica acquisita ({len(spec)} caratteri)")
+    return spec
 
 
-""",
-        expected_output="Realistic architectural review for the FP4 Meta-HDL prototype.",
-        agent=designer,
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT 1 — PLANNER
+# ─────────────────────────────────────────────────────────────────────────────
 
-    task2 = Task(
-        description=f"""
-Validate the HLS analysis of the generated unit.
-
-Critical path:
-{json.dumps(critical, indent=2)}
-
-Resources:
-{json.dumps(resources, indent=2)}
-
-""",
-        expected_output="HLS validation report.",
-        agent=analyzer,
-    )
-
-    crew = Crew(
-        agents=[designer, analyzer],
-        tasks=[task1, task2],
-        process=Process.sequential,
-        verbose=True,
-    )
-
-    result = crew.kickoff()
-    return str(result)
-
-
-def deterministic_architectural_review(
-    fp_format: str,
-    ir: List[Dict[str, Any]],
-    schedule: Dict[str, int],
-    pipeline: Dict[int, List[str]],
-    critical: Dict[str, int],
-    resources: Dict[str, Any],
-    tests: Dict[str, Any],
-    note: str = "",
-) -> str:
+def run_planner(spec: str, agent: Agent) -> dict:
     """
-    Analisi testuale non-LLM, utile per avere sempre un report.
+    Il Planner analizza la specifica e produce un piano JSON strutturato
+    con: nome modulo, ingressi/uscite, algoritmo, segnali interni.
+    Il piano è poi usato dal Coder come base per la generazione.
     """
-    max_latency = max(critical.values()) if critical else 0
-    peak = resources["peak_parallel_resources"]
+    agent_step("PLANNER", "Analisi della specifica → piano di implementazione JSON")
 
-    review = []
-    review.append("# Architectural Review")
-    review.append("")
-    if note:
-        review.append(f"Nota: {note}")
-        review.append("")
-
-    review.append(f"Il progetto genera una unità prototipale per formato {fp_format}.")
-    review.append(f"La IR contiene {len(ir)} operazioni.")
-    review.append(f"La latenza stimata del critical path è pari a {max_latency} cicli.")
-    review.append("")
-    review.append("## Parallelismo individuato")
-    review.append(f"- Picco adders paralleli: {peak['peak_adders']}")
-    review.append(f"- Picco subtractors paralleli: {peak['peak_subtractors']}")
-    review.append(f"- Picco multipliers paralleli: {peak['peak_multipliers']}")
-    review.append(f"- Picco dividers paralleli: {peak['peak_dividers']}")
-    review.append("")
-    review.append("## Validazione numerica FP4")
-    review.append(f"- Test eseguiti: {tests['n_tests']}")
-    review.append(f"- Errore assoluto medio: {tests['mean_absolute_error']:.6f}")
-    review.append(f"- Errore assoluto massimo: {tests['max_absolute_error']:.6f}")
-    review.append(f"- Errore relativo medio: {tests['mean_relative_error']:.6f}")
-    review.append("")
-
-    return "\n".join(review)
-
-
-# 8. REPORT
-
-def generate_markdown_report(
-    input_file: Path,
-    fp_format: str,
-    code: str,
-    ir: List[Dict[str, Any]],
-    var_map: Dict[str, str],
-    return_value: Optional[str],
-    unsupported: List[str],
-    schedule: Dict[str, int],
-    pipeline: Dict[int, List[str]],
-    critical: Dict[str, int],
-    resources: Dict[str, Any],
-    hdl: str,
-    tests: Dict[str, Any],
-    ai_review: str,
-) -> str:
-    max_latency = max(critical.values()) if critical else 0
-
-    requirement_matrix = [
-        ("Soluzione agentica Meta-HDL", "Soddisfatto", "CrewAI opzionale + analisi deterministica sempre disponibile"),
-        ("Parsing codice Python", "Soddisfatto", "AST Python"),
-        ("Intermediate Representation", "Soddisfatto", "IR con operazioni, input, output e latenze"),
-        ("Data Flow Graph", "Soddisfatto", "NetworkX DiGraph"),
-        ("Analisi HLS", "Soddisfatto", "Critical path, ASAP scheduling, stima risorse"),
-        ("Generazione Meta-HDL", "Soddisfatto", "Backend PyMTL3 prototipale"),
-        ("Supporto MXFP4/NVFP4", "Soddisfatto", "Datapath a 4 bit"),
-        ("Validazione automatica", "Soddisfatto", "Test casuali e confronto float vs FP4"),
-    ]
-
-    lines = []
-    lines.append(f"# Meta-HDL FP4 Unit Report — {fp_format}")
-    lines.append("")
-    lines.append(f"Data generazione: {datetime.now().isoformat(timespec='seconds')}")
-    lines.append(f"Input file: `{input_file}`")
-    lines.append("")
-    lines.append("## 1. Sintesi")
-    lines.append("")
-    lines.append(
-        f"Il framework ha analizzato il codice Python, generato una IR con "
-        f"{len(ir)} operazioni, costruito il DFG, stimato una latenza critica "
-        f"di {max_latency} cicli e prodotto un backend PyMTL3 prototipale."
+    raw = agent.run(
+        f"Specifica dell'unità da implementare:\n\n{spec}\n\n"
+        "Crea il piano JSON completo."
     )
-    lines.append("")
-    lines.append("## 2. Matrice requisiti-risultati")
-    lines.append("")
-    lines.append("| Requisito | Stato | Nota |")
-    lines.append("|---|---|---|")
-    for req, status, note in requirement_matrix:
-        lines.append(f"| {req} | {status} | {note} |")
-    lines.append("")
-    lines.append("## 3. Codice Python sorgente")
-    lines.append("")
-    lines.append("```python")
-    lines.append(code.strip())
-    lines.append("```")
-    lines.append("")
-    lines.append("## 4. Intermediate Representation")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(ir, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("## 5. Variable Map")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(var_map, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append(f"Return value: `{return_value}`")
-    lines.append("")
-    lines.append("## 6. Scheduling e Pipeline")
-    lines.append("")
-    lines.append("### Schedule ASAP")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(schedule, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("### Pipeline stages")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(pipeline, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("### Critical path")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(critical, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("## 7. Stima risorse")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(resources, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("## 8. Validazione FP4")
-    lines.append("")
-    summary = {k: v for k, v in tests.items() if k != "tests"}
-    lines.append("```json")
-    lines.append(json.dumps(summary, indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("### Primi 5 test")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(tests["tests"][:5], indent=2))
-    lines.append("```")
-    lines.append("")
-    lines.append("## 9. Codice PyMTL3 generato")
-    lines.append("")
-    lines.append("```python")
-    lines.append(hdl)
-    lines.append("```")
-    lines.append("")
-    lines.append("## 10. Nodi non supportati o avvisi")
-    lines.append("")
-    if unsupported:
-        lines.append("```json")
-        lines.append(json.dumps(unsupported, indent=2))
-        lines.append("```")
-    else:
-        lines.append("Nessun nodo non supportato rilevato.")
-    lines.append("")
-    lines.append("## 11. Analisi architetturale")
-    lines.append("")
-    lines.append(ai_review)
-    lines.append("")
 
-    return "\n".join(lines)
+    # Estrazione robusta del JSON (il modello potrebbe aggiungere testo attorno)
+    clean = re.sub(r"```json|```", "", raw).strip()
+    m = re.search(r"\{.*\}", clean, re.DOTALL)
+    if m:
+        clean = m.group(0)
 
-# 9. OUTPUT FILE
+    try:
+        plan = json.loads(clean)
+        ok(f"Modulo: '{plan.get('nome_modulo', '?')}'  —  "
+           f"tipo: {plan.get('tipo', '?')}")
+        ok(f"Ingressi: {len(plan.get('ingressi', []))}  |  "
+           f"Uscite: {len(plan.get('uscite', []))}")
+        if plan.get("passi_algoritmo"):
+            ok(f"Algoritmo: {len(plan['passi_algoritmo'])} passi pianificati")
+        return plan
+    except json.JSONDecodeError as e:
+        warn(f"JSON non parsabile ({e}) — continuo con piano testuale")
+        return {"nome_modulo": "MxFp4Unit", "tipo": "combinatorio",
+                "descrizione": spec, "raw_plan": raw,
+                "ingressi": [], "uscite": [], "passi_algoritmo": []}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT 2 — CODER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_coder(plan: dict, spec: str, agent: Agent) -> str:
+    """
+    Il Coder riceve il piano JSON e genera il codice Chisel 3 completo
+    con Bundle MXFP4, modulo principale e commenti per la tesi.
+    """
+    agent_step("CODER", "Generazione codice Chisel 3 MXFP4")
+
+    plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
+    prompt = (
+        f"Specifica originale:\n{spec}\n\n"
+        f"Piano di implementazione:\n{plan_str}\n\n"
+        "Genera il codice Chisel 3 completo e compilabile.\n"
+        "Ricorda: no markdown fence, solo codice Scala."
+    )
+
+    code = agent.run(prompt)
+    # Rimuovi eventuali fence markdown residui
+    code = re.sub(r"```scala|```", "", code).strip()
+
+    ok(f"Codice generato: {len(code)} caratteri, "
+       f"{code.count(chr(10))+1} righe")
+    return code
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT 3+4 — REVIEW / FIX LOOP (cuore del sistema agentico)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_review_fix_loop(
+    code:      str,
+    spec:      str,
+    reviewer:  Agent,
+    fixer:     Agent,
+    compiler:  SbtCompiler,
+    stem:      str,
+    max_iter:  int
+) -> tuple[str, list[dict]]:
+    """
+    LOOP AGENTICO: Reviewer valuta il codice, se ci sono problemi
+    Fixer li corregge. Si ripete fino a PASS o max_iter raggiunto.
+
+    Il Fixer mantiene la history tra iterazioni: "ricorda" cosa ha già
+    provato a correggere, evitando di ripetere gli stessi errori.
+
+    Ritorna: (codice_finale, log_iterazioni)
+    """
+    agent_step("REVIEWER/FIXER", f"Loop review → fix (max {max_iter} iterazioni)")
+
+    iteration_log: list[dict] = []
+
+    for i in range(1, max_iter + 1):
+        print(f"\n  {CYAN}── Iterazione {i}/{max_iter} ──{RESET}")
+
+        # ── Revisione LLM (Reviewer) ──
+        reviewer.reset_history()   # ogni review è indipendente
+        review_result = reviewer.run(
+            f"Specifica originale:\n{spec}\n\n"
+            f"Codice Chisel da revisionare:\n{code}"
+        )
+        passed_llm = review_result.strip().upper().startswith("PASS")
+
+        if passed_llm:
+            ok("LLM Reviewer: PASS")
+        else:
+            warn("LLM Reviewer: trovati problemi")
+            # Mostra le prime 5 issues
+            issues_preview = "\n".join(review_result.splitlines()[:6])
+            print(f"  {DIM}{issues_preview}{RESET}")
+
+        # ── Compilazione reale con sbt (se disponibile) ──
+        compile_ok, compile_out = compiler.compile(code, stem)
+        if compiler.available:
+            if compile_ok:
+                ok("sbt compile: OK")
+            else:
+                warn("sbt compile: ERRORI")
+                print(f"  {DIM}{compile_out[:300]}…{RESET}")
+        else:
+            info("sbt non disponibile — solo revisione LLM")
+
+        # ── Log iterazione ──
+        log_entry: dict = {
+            "iterazione":      i,
+            "review_llm":      review_result,
+            "review_llm_pass": passed_llm,
+            "compile_ok":      compile_ok,
+            "compile_output":  compile_out[:600] if compile_out else "",
+            "fix_applicato":   False,
+            "esito":           "",
+        }
+
+        # ── Esito ──
+        tutto_ok = passed_llm and compile_ok
+
+        if tutto_ok:
+            ok(f"✅ Codice validato all'iterazione {i}")
+            log_entry["esito"] = "PASS"
+            iteration_log.append(log_entry)
+            break
+
+        if i == max_iter:
+            warn(f"⚠ Raggiunto limite iterazioni ({max_iter}) — uso l'ultimo codice")
+            log_entry["esito"] = "MAX_ITER_REACHED"
+            iteration_log.append(log_entry)
+            break
+
+        # ── Fix (Fixer — mantiene history tra iterazioni) ──
+        agent_step("FIXER", f"Correzione automatica (iterazione {i})")
+
+        fix_prompt = f"Codice con problemi:\n{code}\n\n"
+        if not passed_llm:
+            fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
+        if not compile_ok and compiler.available:
+            fix_prompt += (
+                f"Errori di compilazione sbt:\n{compile_out[:1000]}\n\n"
+            )
+        fix_prompt += (
+            "Correggi TUTTI i problemi elencati e restituisci "
+            "il codice Chisel completo e corretto."
+        )
+
+        code = fixer.run(fix_prompt)
+        code = re.sub(r"```scala|```", "", code).strip()
+        ok(f"Codice corretto: {len(code)} caratteri")
+
+        log_entry["fix_applicato"] = True
+        log_entry["esito"]         = "FIXED_CONTINUE"
+        iteration_log.append(log_entry)
+
+    return code, iteration_log
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT 5 — TESTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_tester(code: str, plan: dict, agent: Agent) -> str:
+    """
+    Il Tester genera un testbench ChiselTest/ScalaTest completo,
+    coprendo casi base, zero, massimo, overflow e simmetria.
+    """
+    agent_step("TESTER", "Generazione testbench ChiselTest")
+
+    plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
+    tb = agent.run(
+        f"Piano del modulo:\n{plan_str}\n\n"
+        f"Codice Chisel del modulo:\n{code}\n\n"
+        "Genera il testbench ChiselTest completo.\n"
+        "Ricorda: no markdown fence, solo codice Scala."
+    )
+    tb = re.sub(r"```scala|```", "", tb).strip()
+    ok(f"Testbench generato: {len(tb)} caratteri")
+    return tb
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SALVATAGGIO OUTPUT
+# ─────────────────────────────────────────────────────────────────────────────
 
 def save_outputs(
-    output_dir: Path,
-    fp_format: str,
-    hdl: str,
-    report: str,
-    tests: Dict[str, Any],
-    ir: List[Dict[str, Any]],
-):
-    output_dir.mkdir(parents=True, exist_ok=True)
+    spec:         str,
+    plan:         dict,
+    code:         str,
+    testbench:    str,
+    iter_log:     list[dict],
+    model:        str,
+    compiler_avail: bool
+) -> Path:
+    """
+    Salva tutti gli artefatti nella directory di output:
+      • Modulo Chisel (.scala)
+      • Testbench (.scala)
+      • Report Markdown (per la tesi)
+      • Log JSON completo (tracciabilità agente)
+      • build.sbt (pronto da compilare)
+      • README.md
+    """
+    step(6, "Salvataggio artefatti")
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem  = re.sub(r"[^a-zA-Z0-9_]", "_",
+                   plan.get("nome_modulo", "MxFp4Unit"))
+    msafe = model.replace(":", "_").replace("/", "_")
+    ts    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out   = Path(f"chisel_output_{stem}_{msafe}_{ts}")
+    out.mkdir(exist_ok=True)
 
-    hdl_path = output_dir / f"{fp_format}_arith_unit_{timestamp}.py"
-    report_path = output_dir / f"meta_hdl_report_{fp_format}_{timestamp}.md"
-    tests_path = output_dir / f"test_vectors_{fp_format}_{timestamp}.json"
-    ir_path = output_dir / f"ir_{fp_format}_{timestamp}.json"
+    hdr = (
+        "// ═══════════════════════════════════════════════════════════\n"
+        "//  Generato da: agentic_chisel_mxfp4_ollama.py\n"
+        f"//  Modello Ollama: {model}\n"
+        f"//  Data: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+        "// ═══════════════════════════════════════════════════════════\n\n"
+    )
 
-    hdl_path.write_text(hdl, encoding="utf-8")
-    report_path.write_text(report, encoding="utf-8")
-    tests_path.write_text(json.dumps(tests, indent=2), encoding="utf-8")
-    ir_path.write_text(json.dumps(ir, indent=2), encoding="utf-8")
+    # ── Modulo Chisel ──
+    (out / f"{stem}.scala").write_text(hdr + code, encoding="utf-8")
+    ok(f"Modulo Chisel   → {out}/{stem}.scala")
 
-    return {
-        "hdl": hdl_path,
-        "report": report_path,
-        "tests": tests_path,
-        "ir": ir_path,
-    }
+    # ── Testbench ──
+    (out / f"{stem}Test.scala").write_text(hdr + testbench, encoding="utf-8")
+    ok(f"Testbench       → {out}/{stem}Test.scala")
 
-# 10. MAIN
+    # ── build.sbt ──
+    (out / "build.sbt").write_text(
+        'scalaVersion := "2.13.12"\n\n'
+        'libraryDependencies ++= Seq(\n'
+        '  "org.chipsalliance" %% "chisel"     % "6.5.0",\n'
+        '  "edu.berkeley.cs"   %% "chiseltest" % "6.0.0" % "test",\n'
+        ')\n\n'
+        'addCompilerPlugin(\n'
+        '  "org.chipsalliance" % "chisel-plugin" % "6.5.0" cross CrossVersion.full\n'
+        ')\n\n'
+        'scalacOptions ++= Seq(\n'
+        '  "-language:reflectiveCalls",\n'
+        '  "-deprecation",\n'
+        '  "-feature",\n'
+        '  "-Xcheckinit",\n'
+        ')\n',
+        encoding="utf-8"
+    )
+    ok(f"build.sbt       → {out}/build.sbt")
 
-def ask_fp_format() -> str:
-    print("\nSeleziona il formato FP4:")
-    print("  1) MXFP4")
-    print("  2) NVFP4")
+    # ── Report Markdown (per la tesi) ──
+    n_fix  = sum(1 for it in iter_log if it.get("fix_applicato"))
+    n_pass = sum(1 for it in iter_log if it.get("esito") == "PASS")
+
+    iters_md = ""
+    for it in iter_log:
+        esito_emoji = "✅" if it["esito"] == "PASS" else (
+                      "🔧" if it["fix_applicato"] else "⚠️")
+        iters_md += (
+            f"\n#### Iterazione {it['iterazione']} {esito_emoji} "
+            f"`{it['esito']}`\n\n"
+            f"| Verifica | Risultato |\n|---|---|\n"
+            f"| LLM Reviewer | `{'PASS' if it['review_llm_pass'] else 'ISSUES'}` |\n"
+            f"| sbt compile  | `{'OK' if it['compile_ok'] else 'FAIL'}` |\n"
+            f"| Fix applicato | `{it['fix_applicato']}` |\n"
+        )
+        if it.get("fix_applicato") and it.get("review_llm"):
+            excerpt = it["review_llm"][:400]
+            iters_md += f"\n**Issues rilevati:**\n```\n{excerpt}\n```\n"
+
+    algo_md = ""
+    for p in plan.get("passi_algoritmo", []):
+        algo_md += f"- {p}\n"
+
+    (out / f"report_{stem}.md").write_text(
+        f"# Report Agentico — {stem} Chisel MXFP4\n\n"
+        f"| Campo | Valore |\n|---|---|\n"
+        f"| **Modulo** | `{stem}` |\n"
+        f"| **Modello Ollama** | `{model}` |\n"
+        f"| **Data** | {datetime.datetime.now().isoformat(timespec='seconds')} |\n"
+        f"| **Agenti eseguiti** | Planner, Coder, Reviewer, Fixer, Tester |\n"
+        f"| **Iterazioni review/fix** | {len(iter_log)} |\n"
+        f"| **Fix automatici applicati** | {n_fix} |\n"
+        f"| **Compilazione sbt** | "
+        f"{'Abilitata' if compiler_avail else 'Non disponibile (solo LLM review)'} |\n\n"
+        f"---\n\n"
+        f"## Specifica Originale\n\n{spec}\n\n"
+        f"---\n\n"
+        f"## Piano di Implementazione (Planner Agent)\n\n"
+        f"```json\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n```\n\n"
+        f"### Algoritmo pianificato\n\n{algo_md}\n"
+        f"---\n\n"
+        f"## Log Agentico — Review/Fix Loop\n{iters_md}\n"
+        f"---\n\n"
+        f"## Formato MXFP4 (E2M1)\n\n"
+        f"```\n"
+        f"bit[3]   = segno  (0=+, 1=−)\n"
+        f"bit[2:1] = esponente a 2 bit (bias=1)\n"
+        f"bit[0]   = mantissa a 1 bit\n\n"
+        f"Valore: (−1)^sign × 2^(exp−1) × (1 + mant×0.5)\n"
+        f"Valori speciali: 0b0000=0, 0b0111=+6.0, 0b1111=−6.0\n"
+        f"```\n\n"
+        f"---\n\n"
+        f"*Report generato automaticamente da `agentic_chisel_mxfp4_ollama.py`*\n",
+        encoding="utf-8"
+    )
+    ok(f"Report Markdown → {out}/report_{stem}.md")
+
+    # ── Log JSON completo (tracciabilità del workflow agentico) ──
+    (out / "agent_log.json").write_text(
+        json.dumps({
+            "timestamp": ts,
+            "model":     model,
+            "spec":      spec,
+            "plan":      plan,
+            "stats": {
+                "iterazioni":    len(iter_log),
+                "fix_applicati": n_fix,
+                "esito_finale":  iter_log[-1]["esito"] if iter_log else "N/A",
+            },
+            "iterations": iter_log,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    ok(f"Log JSON        → {out}/agent_log.json")
+
+    # ── README ──
+    (out / "README.md").write_text(
+        f"# {stem} — Chisel MXFP4\n\n"
+        f"Generato da **agentic_chisel_mxfp4_ollama.py** con modello `{model}`.\n\n"
+        f"## Compilazione e test\n\n"
+        f"```bash\nsbt test\n```\n\n"
+        f"## File generati\n\n"
+        f"| File | Descrizione |\n|---|---|\n"
+        f"| `{stem}.scala` | Modulo Chisel MXFP4 |\n"
+        f"| `{stem}Test.scala` | Testbench ChiselTest |\n"
+        f"| `report_{stem}.md` | Report completo per la tesi |\n"
+        f"| `agent_log.json` | Log JSON del workflow agentico |\n"
+        f"| `build.sbt` | Progetto SBT |\n",
+        encoding="utf-8"
+    )
+    ok(f"README          → {out}/README.md")
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETUP OLLAMA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_ollama(host: str) -> list[str]:
+    step(0, f"Verifica Ollama ({host})")
+    data = ollama_get(f"{host}/api/tags")
+    if data is None:
+        err(f"Ollama non raggiungibile su {host}")
+        print(f"""
+  {YELLOW}Soluzioni:{RESET}
+    1. Avvia Ollama:       {BOLD}ollama serve{RESET}
+    2. Installa un modello:{BOLD}ollama pull codellama{RESET}
+    3. Host diverso:       {BOLD}--host http://IP:11434{RESET}
+""")
+        sys.exit(1)
+    models = [m["name"] for m in data.get("models", [])]
+    if not models:
+        err("Nessun modello installato. Esegui: ollama pull codellama")
+        sys.exit(1)
+    ok(f"Ollama online — {len(models)} modello/i disponibile/i")
+    return models
+
+
+def choose_model(available: list[str], model_arg: str | None) -> str:
+    if model_arg:
+        matches = [m for m in available if m.startswith(model_arg)]
+        if matches:
+            ok(f"Modello: {BOLD}{matches[0]}{RESET}")
+            return matches[0]
+        warn(f"'{model_arg}' non trovato — scegli dalla lista")
+
+    ordered = []
+    for rec in RECOMMENDED_MODELS:
+        ordered.extend(m for m in available if m.startswith(rec))
+    ordered.extend(m for m in available if m not in ordered)
+
+    print(f"\n  {BOLD}Modelli disponibili:{RESET}")
+    for i, name in enumerate(ordered, 1):
+        is_rec = any(name.startswith(r)
+                     for r in ["codellama", "deepseek-coder", "qwen2.5-coder"])
+        tag = f"  {GREEN}← consigliato per HDL/codice{RESET}" if is_rec else ""
+        print(f"    {BOLD}{i:2}.{RESET} {name}{tag}")
 
     while True:
-        choice = input("Formato [MXFP4]: ").strip().upper()
+        raw = input(f"\n  {BOLD}Scegli numero o nome [1]:{RESET} ").strip() or "1"
+        if raw.isdigit() and 0 < int(raw) <= len(ordered):
+            chosen = ordered[int(raw) - 1]
+            break
+        matches = [m for m in available if m.startswith(raw)]
+        if matches:
+            chosen = matches[0]
+            break
+        warn("Scelta non valida, riprova.")
 
-        if choice == "":
-            return "MXFP4"
-
-        if choice in {"1", "MXFP4"}:
-            return "MXFP4"
-
-        if choice in {"2", "NVFP4"}:
-            return "NVFP4"
-
-        print("Formato non valido. Inserisci 1, 2, MXFP4 oppure NVFP4.")
+    ok(f"Modello selezionato: {BOLD}{chosen}{RESET}")
+    return chosen
 
 
-def ask_input_file() -> Path:
-    while True:
-        value = input("Inserisci il percorso del file Python di input: ").strip()
-
-        # Rimuove eventuali virgolette copiate dal path Windows
-        value = value.strip('"').strip("'")
-
-        if not value:
-            print("Devi inserire un file di input.")
-            continue
-
-        input_file = Path(value)
-
-        if input_file.exists():
-            return input_file
-
-        print(f"File non trovato: {input_file}")
-
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    banner()
+
     parser = argparse.ArgumentParser(
-        description="Enhanced Agentic Meta-HDL FP4 Compiler"
+        description="Agentic Chisel MXFP4 generator — Ollama locale",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Esempi:
+              python agentic_chisel_mxfp4_ollama.py
+              python agentic_chisel_mxfp4_ollama.py --spec "full adder MXFP4 4 bit"
+              python agentic_chisel_mxfp4_ollama.py --file full_adder.py --model codellama
+              python agentic_chisel_mxfp4_ollama.py --spec "moltiplicatore MXFP4" --iter 5 --verbose
+        """)
     )
-
-    parser.add_argument(
-        "--input",
-        "-i",
-        required=False,
-        help="File Python da compilare",
-    )
-
-    parser.add_argument(
-        "--format",
-        "-f",
-        choices=list(FP_FORMATS.keys()),
-        required=False,
-        help="Formato FP4 target",
-    )
-
-    parser.add_argument(
-        "--tests",
-        "-t",
-        type=int,
-        default=32,
-        help="Numero di test automatici",
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Seed per test casuali",
-    )
-
-    parser.add_argument(
-        "--output",
-        "-o",
-        default="generated",
-        help="Cartella output",
-    )
-
-    parser.add_argument(
-        "--crew",
-        action="store_true",
-        help="Abilita analisi opzionale CrewAI",
-    )
-
+    parser.add_argument("--spec",  "-s", help="Specifica testuale (es. 'full adder MXFP4')")
+    parser.add_argument("--file",  "-f", help="File Python come contesto (backward compat)")
+    parser.add_argument("--model", "-m", help="Modello Ollama (es. codellama, deepseek-coder)")
+    parser.add_argument("--host",        default=DEFAULT_HOST,
+                                         help=f"URL Ollama (default: {DEFAULT_HOST})")
+    parser.add_argument("--iter", "-i",  type=int, default=MAX_FIX_ITER,
+                                         help=f"Max iterazioni review/fix (default: {MAX_FIX_ITER})")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Output dettagliato")
     args = parser.parse_args()
 
-    print("\n=== Enhanced Agentic Meta-HDL FP4 Compiler ===")
+    # ── Setup ──
+    available = check_ollama(args.host)
+    model     = choose_model(available, args.model)
+    spec      = get_specification(args.file, args.spec)
+    compiler  = SbtCompiler()
 
-    if args.format:
-        fp_format = args.format
+    if compiler.available:
+        ok("sbt trovato → compilazione reale abilitata nel loop")
     else:
-        fp_format = ask_fp_format()
+        info("sbt non trovato → solo LLM review nel loop  "
+             "(installa sbt da https://www.scala-sbt.org per compilazione reale)")
 
-    if args.input:
-        input_file = Path(args.input)
-    else:
-        input_file = ask_input_file()
+    hr()
+    print(f"\n  {BOLD}Pipeline agentica:{RESET}  "
+          f"Planner → Coder → [Reviewer ⟷ Fixer]×{args.iter} → Tester\n")
 
-    output_dir = Path(args.output)
+    # ── Inizializza i 5 agenti ──
+    planner  = Agent("Planner",  SYSTEM_PLANNER,  args.host, model)
+    coder    = Agent("Coder",    SYSTEM_CODER,    args.host, model)
+    reviewer = Agent("Reviewer", SYSTEM_REVIEWER, args.host, model)
+    fixer    = Agent("Fixer",    SYSTEM_FIXER,    args.host, model)
+    tester   = Agent("Tester",   SYSTEM_TESTER,   args.host, model)
 
-    if not input_file.exists():
-        raise FileNotFoundError(f"File non trovato: {input_file}")
+    t_global = datetime.datetime.now()
 
-    code = input_file.read_text(encoding="utf-8")
+    # ── Esegui il workflow ──
+    plan      = run_planner(spec, planner)
+    stem_safe = re.sub(r"[^a-zA-Z0-9_]", "_",
+                       plan.get("nome_modulo", "MxFp4Unit"))
 
-    print("")
-    print(f"Input: {input_file}")
-    print(f"Format: {fp_format}")
-    print(f"Tests: {args.tests}")
-    print("")
+    code      = run_coder(plan, spec, coder)
 
-    ir, dfg, var_map, return_value, unsupported = build_ir(code)
-
-    if not nx.is_directed_acyclic_graph(dfg):
-        raise ValueError("Il Data Flow Graph contiene cicli: scheduling non possibile")
-
-    critical = critical_path(dfg)
-    sch = schedule_asap(dfg)
-    pipe = pipeline_stages(sch)
-    resources = resource_estimate(ir, sch)
-
-    hdl = generate_pymtl(
-        ir=ir,
-        var_map=var_map,
-        return_value=return_value,
-        fp_format=fp_format,
-        pipelined=True,
+    code, iter_log = run_review_fix_loop(
+        code, spec, reviewer, fixer,
+        compiler, stem_safe, args.iter
     )
 
-    tests = generate_test_vectors(
-        ir=ir,
-        return_value=return_value,
-        fp_format=fp_format,
-        n_tests=args.tests,
-        seed=args.seed,
+    testbench = run_tester(code, plan, tester)
+
+    out_dir   = save_outputs(
+        spec, plan, code, testbench,
+        iter_log, model, compiler.available
     )
 
-    if args.crew:
-        ai_review = run_optional_crew_analysis(
-            fp_format=fp_format,
-            ir=ir,
-            schedule=sch,
-            pipeline=pipe,
-            critical=critical,
-            resources=resources,
-            tests=tests,
-        )
-    else:
-        ai_review = deterministic_architectural_review(
-            fp_format=fp_format,
-            ir=ir,
-            schedule=sch,
-            pipeline=pipe,
-            critical=critical,
-            resources=resources,
-            tests=tests,
-            note="Analisi deterministica usata. CrewAI non abilitato.",
-        )
+    elapsed_total = (datetime.datetime.now() - t_global).total_seconds()
 
-    report = generate_markdown_report(
-        input_file=input_file,
-        fp_format=fp_format,
-        code=code,
-        ir=ir,
-        var_map=var_map,
-        return_value=return_value,
-        unsupported=unsupported,
-        schedule=sch,
-        pipeline=pipe,
-        critical=critical,
-        resources=resources,
-        hdl=hdl,
-        tests=tests,
-        ai_review=ai_review,
-    )
+    # ── Riepilogo finale ──
+    hr()
+    n_fix   = sum(1 for it in iter_log if it.get("fix_applicato"))
+    esito   = iter_log[-1]["esito"] if iter_log else "N/A"
+    esito_s = f"{GREEN}PASS{RESET}" if esito == "PASS" else f"{YELLOW}{esito}{RESET}"
 
-    paths = save_outputs(
-        output_dir=output_dir,
-        fp_format=fp_format,
-        hdl=hdl,
-        report=report,
-        tests=tests,
-        ir=ir,
-    )
+    print(f"""
+{GREEN}{BOLD}  ✅  Pipeline agentica completata in {elapsed_total:.0f}s!{RESET}
 
-    print("--- Summary ---")
-    print(f"IR operations: {len(ir)}")
-    print(f"Critical path: {max(critical.values()) if critical else 0} cycles")
-    print(f"Mean abs error: {tests['mean_absolute_error']:.6f}")
-    print(f"Max abs error: {tests['max_absolute_error']:.6f}")
-    print("")
-    print("--- Generated files ---")
+  {BOLD}📊 Statistiche:{RESET}
+      • Agenti eseguiti:      5  (Planner, Coder, Reviewer, Fixer, Tester)
+      • Iterazioni review/fix: {len(iter_log)}
+      • Fix automatici:        {n_fix}
+      • Esito finale:          {esito_s}
+      • sbt compilazione:      {'✔ abilitata' if compiler.available else '⚠ non disponibile'}
 
-    for name, path in paths.items():
-        print(f"{name}: {path}")
+  {BOLD}📁 Output:{RESET}  {BOLD}{out_dir}/{RESET}
+      ├── {stem_safe}.scala           ← Modulo Chisel MXFP4
+      ├── {stem_safe}Test.scala       ← Testbench ChiselTest
+      ├── report_{stem_safe}.md       ← Report per la tesi
+      ├── agent_log.json              ← Log JSON del workflow agentico
+      ├── build.sbt                   ← Progetto SBT
+      └── README.md
 
-    if unsupported:
-        print("")
-        print("--- Warnings ---")
-        for item in unsupported:
-            print(f"- {item}")
+  {CYAN}Compila e testa:{RESET}
+      cd {out_dir}
+      sbt test
+""")
+    hr()
+
 
 if __name__ == "__main__":
-    main()            
+    main()
