@@ -1,41 +1,3 @@
-#!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║       Agentic Chisel MXFP4 Generator — Powered by Ollama (100% locale)     ║
-║       Soluzione AGENTICA per tesi: HDL meta-language + low-precision arith  ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-ARCHITETTURA AGENTICA (5 agenti specializzati):
-
-  ┌──────────┐    ┌────────┐    ┌──────────┐    ┌────────┐    ┌────────┐
-  │ PLANNER  │ -> │ CODER  │ -> │ REVIEWER │ -> │ FIXER  │ -> │ TESTER │
-  │ (piano)  │    │(codice)│ ^  │(revisione│    │(correz.)    │(testbench)
-  └──────────┘    └────────┘ |  └──────────┘    └────────┘    └────────┘
-                             |       |               |
-                             └───────┴──── LOOP ─────┘
-                                  (max N iterazioni)
-
-  + SbtCompiler: tool non-LLM, tenta la compilazione reale con sbt
-
-DIFFERENZE rispetto alla versione precedente (script lineare):
-  • Input: specifica testuale (non più file Python già scritto)
-  • Ogni agente ha memoria conversazionale (history multi-turn)
-  • Loop automatico Review→Fix fino a codice valido o max iterazioni
-  • Compilazione reale con sbt (se installato) + revisione LLM
-  • Log JSON completo di ogni iterazione (tracciabile per la tesi)
-
-Uso:
-  python agentic_chisel_mxfp4_ollama.py
-  python agentic_chisel_mxfp4_ollama.py --spec "full adder MXFP4 4 bit"
-  python agentic_chisel_mxfp4_ollama.py --file full_adder.py --model codellama
-  python agentic_chisel_mxfp4_ollama.py --spec "moltiplicatore MXFP4" --iter 5
-
-Requisiti:
-  • Ollama in esecuzione  →  ollama serve
-  • Almeno un modello:   →  ollama pull codellama
-  • (opzionale) sbt per compilazione reale  →  https://www.scala-sbt.org
-"""
-
 import os
 import sys
 import json
@@ -49,12 +11,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# CONFIGURAZIONE
-
+# Configurazione di ollama.
 DEFAULT_HOST   = "http://localhost:11434"
-MAX_FIX_ITER   = 3      # iterazioni default del loop review/fix
-OLLAMA_TIMEOUT = 600    # secondi timeout per ogni chiamata LLM
+MAX_FIX_ITER   = 3     # Metto un limite di tre interazioni per evitare loop infiniti.
+OLLAMA_TIMEOUT = 600   # Metto un timeout per le chiamate ad ollama. 
 
+# Modelli consigliati per il workflow. Do la possibiilità di scegliere il modello per avere più versatilità e per poter effettuare test con modelli diversi.
 RECOMMENDED_MODELS = [
     "codellama",
     "deepseek-coder",
@@ -66,8 +28,7 @@ RECOMMENDED_MODELS = [
     "phi4",
 ]
 
-# SYSTEM PROMPT — uno per agente, ognuno è uno specialista diverso
-
+# Prepraro i prompt per i vari agenti. Questi prompt sono progettati per guidare il comportamento degli agenti LLM in modo coerente con il loro ruolo specifico nel workflow.
 SYSTEM_PLANNER = """\
 Sei un esperto di architetture hardware digitale e aritmetica a bassa precisione.
 Ricevi una specifica testuale di un'unità aritmetica da implementare in Chisel 3
@@ -211,10 +172,7 @@ Rispondi con SOLO il codice Scala del testbench.
 Nessun markdown, nessun testo aggiuntivo.
 """
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COLORI TERMINALE
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Set di colori per i messaggi in console.
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
 CYAN   = "\033[36m"
@@ -225,11 +183,12 @@ DIM    = "\033[2m"
 BLUE   = "\033[34m"
 MAGENTA = "\033[35m"
 
+# Messaggi di log e banner per l'interfaccia utente.
 def banner():
     print(f"""\n{CYAN}{BOLD}\
 ╔══════════════════════════════════════════════════════════════════╗
-║  🤖  Agentic Chisel MXFP4 Generator  (Ollama — 100% locale)    ║
-║  Planner → Coder → [Reviewer ⟷ Fixer]* → Tester → Output      ║
+║  Agentic Chisel MXFP4 Generator  (Ollama — 100% locale)          ║
+║  Planner → Coder → [Reviewer ⟷ Fixer]* → Tester → Output        ║
 ╚══════════════════════════════════════════════════════════════════╝{RESET}""")
 
 def agent_step(agent_name: str, desc: str):
@@ -254,12 +213,8 @@ def hr():
     print(f"{DIM}{'─' * 68}{RESET}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OLLAMA — utility HTTP
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Api per ollama. Ollama_get() ritorna il JSON o None se non raggiungibile. Ollama_chat() gestisce la chat multi-turn con history e system prompt.
 def ollama_get(url: str, timeout: int = 5):
-    """GET su Ollama, ritorna il JSON o None se non raggiungibile."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -269,17 +224,12 @@ def ollama_get(url: str, timeout: int = 5):
 
 def ollama_chat(host: str, model: str, system_prompt: str,
                 history: list[dict], timeout: int = OLLAMA_TIMEOUT) -> str:
-    """
-    Chiama l'endpoint /api/chat di Ollama con history multi-turn.
-    Il system prompt viene passato nel campo 'system' (non nella history)
-    per separare istruzioni permanenti dal dialogo.
-    """
     payload = {
         "model":   model,
         "stream":  False,
         "system":  system_prompt,
         "options": {
-            "temperature": 0.1,    # bassa: output deterministico per codice
+            "temperature": 0.1,     
             "num_predict": 4096,
         },
         "messages": history,
@@ -302,20 +252,9 @@ def ollama_chat(host: str, model: str, system_prompt: str,
 
     return data.get("message", {}).get("content", "").strip()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CLASSE BASE AGENT
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Classe Agent: rappresenta un agente LLM con memoria conversazionale. Ogni agente mantiene la propria history separata, quindi Fixer "ricorda" le iterazioni precedenti e non ripete gli stessi errori. 
+# Il system prompt è fisso e descrive il ruolo dell'agente.
 class Agent:
-    """
-    Agente LLM con memoria conversazionale (history multi-turn).
-
-    Ogni agente mantiene la propria history separata, quindi Fixer
-    "ricorda" le iterazioni precedenti e non ripete gli stessi errori.
-    Il system prompt è fisso e descrive il ruolo dell'agente.
-    """
-
     def __init__(self, name: str, system_prompt: str, host: str, model: str):
         self.name          = name
         self.system_prompt = system_prompt
@@ -323,8 +262,8 @@ class Agent:
         self.model         = model
         self.history: list[dict] = []   # memoria conversazionale
 
+# Invia un messaggio all'agente e ottiene la risposta. La risposta viene aggiunta alla history per il contesto multi-turn.
     def run(self, user_message: str) -> str:
-        """Invia un messaggio, aggiorna la history, ritorna la risposta."""
         self.history.append({"role": "user", "content": user_message})
         info(f"Agente {BOLD}{self.name}{RESET} in elaborazione…")
 
@@ -340,31 +279,16 @@ class Agent:
         return response
 
     def reset_history(self):
-        """Azzera la memoria (utile tra task indipendenti)."""
         self.history = []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SBT COMPILER TOOL (non-LLM)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Classe SbtCompiler: gestisce la compilazione reale del codice Chisel generato. Scrive il codice in una directory temporanea, esegue 'sbt compile' e cattura eventuali errori. 
 class SbtCompiler:
-    """
-    Tool di compilazione reale: scrive il codice in una dir temporanea,
-    lancia 'sbt compile' e cattura gli errori.
-
-    Se sbt non è installato, salta silenziosamente (solo revisione LLM).
-    Questo rende il tool opzionale senza interrompere il workflow.
-    """
-
     def __init__(self):
         self.available = shutil.which("sbt") is not None
 
+# Compila il codice Chisel in una directory temporanea. Ritorna (successo, output). Se sbt non è disponibile, ritorna True con un messaggio di avviso.
     def compile(self, chisel_code: str, stem: str) -> tuple[bool, str]:
-        """
-        Tenta la compilazione con sbt.
-        Ritorna (successo: bool, output_errori: str).
-        """
         if not self.available:
             return True, "sbt non trovato — compilazione reale saltata"
 
@@ -399,19 +323,9 @@ class SbtCompiler:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 0 — Acquisizione specifica
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Input della specifica: può essere fornita come argomento CLI (--spec), come file Python (--file) o in modalità interattiva. 
+# La funzione get_specification gestisce queste tre modalità e ritorna la specifica testuale da usare nel workflow.
 def get_specification(file_arg: str | None, spec_arg: str | None) -> str:
-    """
-    Ottiene la specifica dell'unità da implementare.
-    Tre modalità (priorità: spec_arg > file_arg > interattivo):
-      1. --spec "testo"     — specifica testuale diretta
-      2. --file file.py     — usa il codice Python come contesto
-      3. interattivo        — chiede all'utente
-    """
     step(0, "Acquisizione della specifica")
 
     if spec_arg:
@@ -450,17 +364,9 @@ def get_specification(file_arg: str | None, spec_arg: str | None) -> str:
     ok(f"Specifica acquisita ({len(spec)} caratteri)")
     return spec
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AGENT 1 — PLANNER
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato. 
+# Il piano include nome modulo, ingressi/uscite, algoritmo e segnali interni. Questo piano è poi usato dal Coder come base per la generazione del codice Chisel.
 def run_planner(spec: str, agent: Agent) -> dict:
-    """
-    Il Planner analizza la specifica e produce un piano JSON strutturato
-    con: nome modulo, ingressi/uscite, algoritmo, segnali interni.
-    Il piano è poi usato dal Coder come base per la generazione.
-    """
     agent_step("PLANNER", "Analisi della specifica → piano di implementazione JSON")
 
     raw = agent.run(
@@ -468,7 +374,7 @@ def run_planner(spec: str, agent: Agent) -> dict:
         "Crea il piano JSON completo."
     )
 
-    # Estrazione robusta del JSON (il modello potrebbe aggiungere testo attorno)
+# Estrazione del JSON dalla risposta dell'agente. 
     clean = re.sub(r"```json|```", "", raw).strip()
     m = re.search(r"\{.*\}", clean, re.DOTALL)
     if m:
@@ -489,16 +395,8 @@ def run_planner(spec: str, agent: Agent) -> dict:
                 "descrizione": spec, "raw_plan": raw,
                 "ingressi": [], "uscite": [], "passi_algoritmo": []}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AGENT 2 — CODER
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Secondo agente: il Coder riceve il piano JSON e genera il codice Chisel 3 completo.
 def run_coder(plan: dict, spec: str, agent: Agent) -> str:
-    """
-    Il Coder riceve il piano JSON e genera il codice Chisel 3 completo
-    con Bundle MXFP4, modulo principale e commenti per la tesi.
-    """
     agent_step("CODER", "Generazione codice Chisel 3 MXFP4")
 
     plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
@@ -510,18 +408,14 @@ def run_coder(plan: dict, spec: str, agent: Agent) -> str:
     )
 
     code = agent.run(prompt)
-    # Rimuovi eventuali fence markdown residui
     code = re.sub(r"```scala|```", "", code).strip()
 
     ok(f"Codice generato: {len(code)} caratteri, "
        f"{code.count(chr(10))+1} righe")
     return code
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AGENT 3+4 — REVIEW / FIX LOOP (cuore del sistema agentico)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Terzo e quarto agente: Reviewer e Fixer lavorano in un loop. 
+# Il Reviewer valuta il codice generato, se ci sono problemi il Fixer li corregge. Questo ciclo si ripete fino a quando il codice passa la revisione o si raggiunge il numero massimo di iterazioni (3).
 def run_review_fix_loop(
     code:      str,
     spec:      str,
@@ -531,15 +425,6 @@ def run_review_fix_loop(
     stem:      str,
     max_iter:  int
 ) -> tuple[str, list[dict]]:
-    """
-    LOOP AGENTICO: Reviewer valuta il codice, se ci sono problemi
-    Fixer li corregge. Si ripete fino a PASS o max_iter raggiunto.
-
-    Il Fixer mantiene la history tra iterazioni: "ricorda" cosa ha già
-    provato a correggere, evitando di ripetere gli stessi errori.
-
-    Ritorna: (codice_finale, log_iterazioni)
-    """
     agent_step("REVIEWER/FIXER", f"Loop review → fix (max {max_iter} iterazioni)")
 
     iteration_log: list[dict] = []
@@ -547,8 +432,8 @@ def run_review_fix_loop(
     for i in range(1, max_iter + 1):
         print(f"\n  {CYAN}── Iterazione {i}/{max_iter} ──{RESET}")
 
-        # ── Revisione LLM (Reviewer) ──
-        reviewer.reset_history()   # ogni review è indipendente
+# Revisione LLM 
+        reviewer.reset_history()  
         review_result = reviewer.run(
             f"Specifica originale:\n{spec}\n\n"
             f"Codice Chisel da revisionare:\n{code}"
@@ -559,11 +444,10 @@ def run_review_fix_loop(
             ok("LLM Reviewer: PASS")
         else:
             warn("LLM Reviewer: trovati problemi")
-            # Mostra le prime 5 issues
             issues_preview = "\n".join(review_result.splitlines()[:6])
             print(f"  {DIM}{issues_preview}{RESET}")
 
-        # ── Compilazione reale con sbt (se disponibile) ──
+# Compilazione con sbt. 
         compile_ok, compile_out = compiler.compile(code, stem)
         if compiler.available:
             if compile_ok:
@@ -574,7 +458,7 @@ def run_review_fix_loop(
         else:
             info("sbt non disponibile — solo revisione LLM")
 
-        # ── Log iterazione ──
+# Log iterazione. 
         log_entry: dict = {
             "iterazione":      i,
             "review_llm":      review_result,
@@ -585,22 +469,22 @@ def run_review_fix_loop(
             "esito":           "",
         }
 
-        # ── Esito ──
+# Esito.
         tutto_ok = passed_llm and compile_ok
 
         if tutto_ok:
-            ok(f"✅ Codice validato all'iterazione {i}")
+            ok(f"Codice validato all'iterazione {i}")
             log_entry["esito"] = "PASS"
             iteration_log.append(log_entry)
             break
 
         if i == max_iter:
-            warn(f"⚠ Raggiunto limite iterazioni ({max_iter}) — uso l'ultimo codice")
+            warn(f"Raggiunto limite iterazioni ({max_iter}) — uso l'ultimo codice")
             log_entry["esito"] = "MAX_ITER_REACHED"
             iteration_log.append(log_entry)
             break
 
-        # ── Fix (Fixer — mantiene history tra iterazioni) ──
+# Fix
         agent_step("FIXER", f"Correzione automatica (iterazione {i})")
 
         fix_prompt = f"Codice con problemi:\n{code}\n\n"
@@ -625,16 +509,8 @@ def run_review_fix_loop(
 
     return code, iteration_log
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AGENT 5 — TESTER
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Quinto agente: il Tester genera un testbench ChiselTest/ScalaTest completo, coprendo casi base, zero, massimo, overflow e simmetria.
 def run_tester(code: str, plan: dict, agent: Agent) -> str:
-    """
-    Il Tester genera un testbench ChiselTest/ScalaTest completo,
-    coprendo casi base, zero, massimo, overflow e simmetria.
-    """
     agent_step("TESTER", "Generazione testbench ChiselTest")
 
     plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
@@ -648,11 +524,7 @@ def run_tester(code: str, plan: dict, agent: Agent) -> str:
     ok(f"Testbench generato: {len(tb)} caratteri")
     return tb
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SALVATAGGIO OUTPUT
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Salvataggio di tutti gli outputs in una directory timestamped. Include codice Chisel, testbench, report Markdown, log JSON, build.sbt e README.
 def save_outputs(
     spec:         str,
     plan:         dict,
@@ -662,15 +534,6 @@ def save_outputs(
     model:        str,
     compiler_avail: bool
 ) -> Path:
-    """
-    Salva tutti gli artefatti nella directory di output:
-      • Modulo Chisel (.scala)
-      • Testbench (.scala)
-      • Report Markdown (per la tesi)
-      • Log JSON completo (tracciabilità agente)
-      • build.sbt (pronto da compilare)
-      • README.md
-    """
     step(6, "Salvataggio artefatti")
 
     stem  = re.sub(r"[^a-zA-Z0-9_]", "_",
@@ -688,15 +551,15 @@ def save_outputs(
         "// ═══════════════════════════════════════════════════════════\n\n"
     )
 
-    # ── Modulo Chisel ──
+# Modulo Chisel
     (out / f"{stem}.scala").write_text(hdr + code, encoding="utf-8")
     ok(f"Modulo Chisel   → {out}/{stem}.scala")
 
-    # ── Testbench ──
+# Testbench
     (out / f"{stem}Test.scala").write_text(hdr + testbench, encoding="utf-8")
     ok(f"Testbench       → {out}/{stem}Test.scala")
 
-    # ── build.sbt ──
+# build.sbt
     (out / "build.sbt").write_text(
         'scalaVersion := "2.13.12"\n\n'
         'libraryDependencies ++= Seq(\n'
@@ -716,16 +579,14 @@ def save_outputs(
     )
     ok(f"build.sbt       → {out}/build.sbt")
 
-    # ── Report Markdown (per la tesi) ──
+# Report Markdown
     n_fix  = sum(1 for it in iter_log if it.get("fix_applicato"))
     n_pass = sum(1 for it in iter_log if it.get("esito") == "PASS")
 
     iters_md = ""
     for it in iter_log:
-        esito_emoji = "✅" if it["esito"] == "PASS" else (
-                      "🔧" if it["fix_applicato"] else "⚠️")
         iters_md += (
-            f"\n#### Iterazione {it['iterazione']} {esito_emoji} "
+            f"\n#### Iterazione {it['iterazione']} "
             f"`{it['esito']}`\n\n"
             f"| Verifica | Risultato |\n|---|---|\n"
             f"| LLM Reviewer | `{'PASS' if it['review_llm_pass'] else 'ISSUES'}` |\n"
@@ -774,7 +635,7 @@ def save_outputs(
     )
     ok(f"Report Markdown → {out}/report_{stem}.md")
 
-    # ── Log JSON completo (tracciabilità del workflow agentico) ──
+# Log JSON completo
     (out / "agent_log.json").write_text(
         json.dumps({
             "timestamp": ts,
@@ -792,7 +653,7 @@ def save_outputs(
     )
     ok(f"Log JSON        → {out}/agent_log.json")
 
-    # ── README ──
+# README
     (out / "README.md").write_text(
         f"# {stem} — Chisel MXFP4\n\n"
         f"Generato da **agentic_chisel_mxfp4_ollama.py** con modello `{model}`.\n\n"
@@ -811,11 +672,7 @@ def save_outputs(
 
     return out
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SETUP OLLAMA
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Setup iniziale: verifica che Ollama sia raggiungibile e che ci siano modelli disponibili. Se non ci sono modelli, fornisce istruzioni per installarne uno.
 def check_ollama(host: str) -> list[str]:
     step(0, f"Verifica Ollama ({host})")
     data = ollama_get(f"{host}/api/tags")
@@ -870,11 +727,7 @@ def choose_model(available: list[str], model_arg: str | None) -> str:
     ok(f"Modello selezionato: {BOLD}{chosen}{RESET}")
     return chosen
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Main.
 def main():
     banner()
 
@@ -899,7 +752,7 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="Output dettagliato")
     args = parser.parse_args()
 
-    # ── Setup ──
+# Setup iniziale: verifica Ollama, scegli modello, acquisisci specifica e inizializza compiler.
     available = check_ollama(args.host)
     model     = choose_model(available, args.model)
     spec      = get_specification(args.file, args.spec)
@@ -915,7 +768,7 @@ def main():
     print(f"\n  {BOLD}Pipeline agentica:{RESET}  "
           f"Planner → Coder → [Reviewer ⟷ Fixer]×{args.iter} → Tester\n")
 
-    # ── Inizializza i 5 agenti ──
+# Inizializzo i 5 agenti.
     planner  = Agent("Planner",  SYSTEM_PLANNER,  args.host, model)
     coder    = Agent("Coder",    SYSTEM_CODER,    args.host, model)
     reviewer = Agent("Reviewer", SYSTEM_REVIEWER, args.host, model)
@@ -924,7 +777,7 @@ def main():
 
     t_global = datetime.datetime.now()
 
-    # ── Esegui il workflow ──
+# Eseguo il workflow.
     plan      = run_planner(spec, planner)
     stem_safe = re.sub(r"[^a-zA-Z0-9_]", "_",
                        plan.get("nome_modulo", "MxFp4Unit"))
@@ -945,23 +798,23 @@ def main():
 
     elapsed_total = (datetime.datetime.now() - t_global).total_seconds()
 
-    # ── Riepilogo finale ──
+# Output finale e statistiche.
     hr()
     n_fix   = sum(1 for it in iter_log if it.get("fix_applicato"))
     esito   = iter_log[-1]["esito"] if iter_log else "N/A"
     esito_s = f"{GREEN}PASS{RESET}" if esito == "PASS" else f"{YELLOW}{esito}{RESET}"
 
     print(f"""
-{GREEN}{BOLD}  ✅  Pipeline agentica completata in {elapsed_total:.0f}s!{RESET}
+{GREEN}{BOLD} Pipeline agentica completata in {elapsed_total:.0f}s!{RESET}
 
-  {BOLD}📊 Statistiche:{RESET}
+  {BOLD}Statistiche:{RESET}
       • Agenti eseguiti:      5  (Planner, Coder, Reviewer, Fixer, Tester)
       • Iterazioni review/fix: {len(iter_log)}
       • Fix automatici:        {n_fix}
       • Esito finale:          {esito_s}
       • sbt compilazione:      {'✔ abilitata' if compiler.available else '⚠ non disponibile'}
 
-  {BOLD}📁 Output:{RESET}  {BOLD}{out_dir}/{RESET}
+  {BOLD}Output:{RESET}  {BOLD}{out_dir}/{RESET}
       ├── {stem_safe}.scala           ← Modulo Chisel MXFP4
       ├── {stem_safe}Test.scala       ← Testbench ChiselTest
       ├── report_{stem_safe}.md       ← Report per la tesi
