@@ -307,6 +307,11 @@ class SbtCompiler:
         )
         src = tmp / "src" / "main" / "scala"
         src.mkdir(parents=True, exist_ok=True)
+        proj_dir = tmp / "project"
+        proj_dir.mkdir(exist_ok=True)
+        (proj_dir / "build.properties").write_text(
+            "sbt.version=1.10.7\n", encoding="utf-8"
+        )
         (src / f"{stem}.scala").write_text(chisel_code, encoding="utf-8")
 
         try:
