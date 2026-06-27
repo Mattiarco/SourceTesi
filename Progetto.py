@@ -201,7 +201,7 @@ def ok(msg: str):
     print(f"  {GREEN}OK{RESET}  {msg}")
 
 def warn(msg: str):
-    print(f"  {YELLOW}⚠WRN{RESET}  {msg}")
+    print(f"  {YELLOW}WRN{RESET}  {msg}")
 
 def err(msg: str):
     print(f"  {RED}KO{RESET}  {msg}", file=sys.stderr)
