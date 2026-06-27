@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Configurazione di ollama.
 DEFAULT_HOST   = "http://localhost:11434"
-MAX_FIX_ITER   = 3     # Metto un limite di tre interazioni per evitare loop infiniti.
+MAX_FIX_ITER   = 10    # Metto un limite di interazioni per evitare loop infiniti.
 OLLAMA_TIMEOUT = 600   # Metto un timeout per le chiamate ad ollama. 
 
 # Modelli consigliati per il workflow. Do la possibiilità di scegliere il modello per avere più versatilità e per poter effettuare test con modelli diversi.
@@ -198,16 +198,16 @@ def step(n: int, msg: str):
     print(f"\n{CYAN}{BOLD}[STEP {n}]{RESET} {msg}")
 
 def ok(msg: str):
-    print(f"  {GREEN}✔{RESET}  {msg}")
+    print(f"  {GREEN}OK{RESET}  {msg}")
 
 def warn(msg: str):
-    print(f"  {YELLOW}⚠{RESET}  {msg}")
+    print(f"  {YELLOW}⚠WRN{RESET}  {msg}")
 
 def err(msg: str):
-    print(f"  {RED}✘{RESET}  {msg}", file=sys.stderr)
+    print(f"  {RED}KO{RESET}  {msg}", file=sys.stderr)
 
 def info(msg: str):
-    print(f"  {BLUE}ℹ{RESET}  {msg}")
+    print(f"  {BLUE}Info{RESET}  {msg}")
 
 def hr():
     print(f"{DIM}{'─' * 68}{RESET}")
@@ -415,7 +415,7 @@ def run_coder(plan: dict, spec: str, agent: Agent) -> str:
     return code
 
 # Terzo e quarto agente: Reviewer e Fixer lavorano in un loop. 
-# Il Reviewer valuta il codice generato, se ci sono problemi il Fixer li corregge. Questo ciclo si ripete fino a quando il codice passa la revisione o si raggiunge il numero massimo di iterazioni (3).
+# Il Reviewer valuta il codice generato, se ci sono problemi il Fixer li corregge. Questo ciclo si ripete fino a quando il codice passa la revisione o si raggiunge il numero massimo di iterazioni.
 def run_review_fix_loop(
     code:      str,
     spec:      str,
