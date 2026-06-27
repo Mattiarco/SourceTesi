@@ -135,7 +135,8 @@ REGOLE:
    - := per assegnazioni
    - Commenti in italiano
 
-Rispondi con SOLO il codice Scala/Chisel corretto e completo.
+non scrivere mai codice nella tua risposta.
+Scrivi SOLO "PASS" oppure "ISSUES" seguito dalla lista.
 Nessun markdown, nessun testo aggiuntivo.
 """
 
@@ -285,7 +286,8 @@ class Agent:
 # Classe SbtCompiler: gestisce la compilazione reale del codice Chisel generato. Scrive il codice in una directory temporanea, esegue 'sbt compile' e cattura eventuali errori. 
 class SbtCompiler:
     def __init__(self):
-        self.available = shutil.which("sbt") is not None
+        self.available = shutil.which("sbt") is not None or \
+                 shutil.which("sbt.bat") is not None
 
 # Compila il codice Chisel in una directory temporanea. Ritorna (successo, output). Se sbt non è disponibile, ritorna True con un messaggio di avviso.
     def compile(self, chisel_code: str, stem: str) -> tuple[bool, str]:
@@ -310,7 +312,7 @@ class SbtCompiler:
         try:
             result = subprocess.run(
                 ["sbt", "compile"],
-                cwd=tmp, capture_output=True, text=True, timeout=180
+                cwd=tmp, capture_output=True, text=True, timeout=180, shell=True
             )
             output  = (result.stdout + result.stderr).strip()
             success = result.returncode == 0
