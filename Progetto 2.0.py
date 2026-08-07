@@ -140,6 +140,13 @@ REGOLE OBBLIGATORIE:
 13. I nomi dei segnali di ingresso/uscita nell'IO Bundle DEVONO corrispondere
     ESATTAMENTE (stesso nome) ai campi "nome" di ingressi/uscite nel piano
     JSON ricevuto, per permettere la validazione automatica esterna.
+14. NON aggiungere un "object NomeModulo extends App" con chiamate a
+    "Driver.execute(...)" o simili: non serve né per la compilazione con
+    sbt compile né per i test ChiselTest, e le API "chisel3.Driver" /
+    "chisel3.iotesters.Driver" sono deprecate o rimosse a seconda della
+    versione di Chisel, causando errori di compilazione imprevedibili.
+    Il file deve contenere SOLO la (o le) classi Chisel (Bundle/Module),
+    nessun punto di ingresso eseguibile.
 
 Rispondi con SOLO il codice Scala/Chisel.
 Non usare markdown (no ```), nessun testo prima o dopo il codice.
@@ -169,6 +176,8 @@ CHECKLIST DA VERIFICARE:
       d'uscita, deve esserci un arrotondamento esplicito oppure un
       commento che dichiari il troncamento come scelta consapevole.
   [ ] NOMI PORTE: i nomi dei segnali IO corrispondono ai nomi del piano JSON.
+  [ ] Nessun "object ... extends App" / "Driver.execute(...)": non serve e
+      può causare errori di compilazione legati alla versione di Chisel.
 
 IMPORTANTE — criterio PASS vs ISSUES:
 Rispondi PASS se e solo se TUTTI i punti della checklist sopra sono
@@ -212,6 +221,8 @@ REGOLE:
    - Arrotondamento esplicito (o troncamento dichiarato) prima della
      normalizzazione finale della mantissa
    - Nomi delle porte IO identici ai nomi nel piano JSON
+   - NESSUN "object ... extends App" con Driver.execute(...): non serve e
+     rischia di rompere la compilazione tra versioni diverse di Chisel
 
 Rispondi con SOLO il codice Scala/Chisel completo e corretto.
 Nessuna spiegazione, nessun markdown, nessun testo prima o dopo il codice:
@@ -532,7 +543,44 @@ def extract_scala_code(text: str) -> str:
 
     if last_valid_end is not None:
         code = code[:last_valid_end + 1]
-    return code.strip()
+    return strip_app_entrypoint(code.strip())
+
+
+# Rimuove eventuali "object NomeModulo extends App { ... }" (entry point
+# eseguibile con Driver.execute o simili). Non serve né per "sbt compile"
+# né per i test ChiselTest, e le API Driver cambiano/spariscono tra
+# versioni di Chisel — una causa di errore ricorrente e del tutto evitabile
+# rimuovendola direttamente in Python, invece di fare affidamento solo
+# sull'obbedienza del modello alla regola corrispondente nel prompt.
+def strip_app_entrypoint(code: str) -> str:
+    pattern = re.compile(r"object\s+\w+\s+extends\s+App\s*\{")
+    result = code
+    while True:
+        m = pattern.search(result)
+        if not m:
+            break
+        start = m.start()
+        depth = 0
+        end = None
+        for i in range(m.end() - 1, len(result)):
+            ch = result[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end is None:
+            break  # graffe non bilanciate: meglio non toccare nulla
+        result = result[:start] + result[end + 1:]
+
+    # Rimuove anche l'import residuo (es. "import chisel3.Driver" o
+    # "import chisel3.iotesters.Driver"), che da solo causerebbe un errore
+    # di compilazione nelle versioni di Chisel dove quell'oggetto non esiste
+    # più, anche dopo aver tolto il blocco "object ... extends App".
+    result = re.sub(r"(?m)^\s*import\s+[\w.]*\bDriver\b\s*$\n?", "", result)
+    return result.strip()
 
 
 def extract_json_object(text: str) -> str | None:
@@ -743,7 +791,7 @@ def run_review_fix_loop(
                 ok("sbt compile: OK")
             else:
                 warn("sbt compile: ERRORI")
-                print(f"  {DIM}{compile_out[:300]}…{RESET}")
+                print(f"  {DIM}{compile_out[:1500]}…{RESET}")
         else:
             info("sbt non disponibile — solo revisione LLM")
 
@@ -753,7 +801,7 @@ def run_review_fix_loop(
             "review_llm":      review_result,
             "review_llm_pass": passed_llm,
             "compile_ok":      compile_ok,
-            "compile_output":  compile_out[:600] if compile_out else "",
+            "compile_output":  compile_out if compile_out else "",
             "fix_applicato":   False,
             "esito":           "",
         }
@@ -824,7 +872,7 @@ def run_review_fix_loop(
             fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
         if not compile_ok and compiler.available:
             fix_prompt += (
-                f"Errori di compilazione sbt:\n{compile_out[:1000]}\n\n"
+                f"Errori di compilazione sbt:\n{compile_out[:2500]}\n\n"
             )
         fix_prompt += (
             "Correggi TUTTI i problemi elencati e restituisci "
