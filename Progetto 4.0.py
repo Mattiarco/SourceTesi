@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import shutil
+import shlex
 import subprocess
 import argparse
 import datetime
@@ -388,7 +389,64 @@ class Toolchain:
     def __init__(self):
         self.sbt_available = shutil.which("sbt") is not None or \
                               shutil.which("sbt.bat") is not None
-        self.verilator_available = shutil.which("verilator") is not None
+
+# Su Windows Verilator si installa quasi sempre solo dentro WSL (il supporto
+# nativo Windows è fragile/poco mantenuto). Se non lo troviamo nel PATH nativo,
+# proviamo a vedere se è raggiungibile dentro una distro WSL: in tal caso
+# 'sbt test' (che deve invocare il binario verilator) viene eseguito tramite
+# 'wsl.exe' invece che come processo nativo.
+        self.verilator_available  = shutil.which("verilator") is not None
+        self.use_wsl_verilator    = False
+
+        if not self.verilator_available:
+            wsl_verilator = self._wsl_which("verilator")
+            if wsl_verilator:
+                self.verilator_available = True
+                self.use_wsl_verilator   = True
+
+    @staticmethod
+    def _wsl_which(binary: str) -> str | None:
+        if shutil.which("wsl.exe") is None and shutil.which("wsl") is None:
+            return None
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-e", "which", binary],
+                capture_output=True, text=True, timeout=15
+            )
+            path = result.stdout.strip()
+            return path if result.returncode == 0 and path else None
+        except Exception:
+            return None
+
+# Converte un path Windows nel corrispondente path visto da dentro WSL
+# (es. C:\Users\... → /mnt/c/Users/...). Costruito a mano invece di chiamare
+# 'wslpath' perché quest'ultimo, invocato da un processo Windows con un path
+# contenente backslash, tronca l'argomento in modo inaffidabile (verificato:
+# ritorna 'C:UsersmattiaAppData...' senza backslash ed exit code 1). Il mount
+# automatico '/mnt/<drive minuscola>/...' è lo standard su WSL2 di default.
+    @staticmethod
+    def _to_wsl_path(win_path: Path) -> str:
+        p = str(win_path.resolve())
+        drive, rest = p.split(":", 1)
+        rest = rest.replace("\\", "/")
+        return f"/mnt/{drive.lower()}{rest}"
+
+# Esegue 'sbt <args>' nella directory 'cwd': nativamente su Windows, oppure
+# tramite 'wsl.exe' quando l'esecuzione dei test richiede il Verilator
+# disponibile solo dentro WSL.
+    def _run_sbt(self, args: list[str], cwd: Path, timeout: int,
+                 via_wsl: bool) -> subprocess.CompletedProcess:
+        if via_wsl:
+            wsl_dir = self._to_wsl_path(cwd)
+            cmd_str = "cd " + shlex.quote(wsl_dir) + " && sbt " + " ".join(args)
+            return subprocess.run(
+                ["wsl.exe", "-e", "bash", "-lc", cmd_str],
+                capture_output=True, text=True, timeout=timeout
+            )
+        return subprocess.run(
+            ["sbt", *args], cwd=cwd,
+            capture_output=True, text=True, timeout=timeout, shell=True
+        )
 
 # Crea un progetto SBT minimale in una directory temporanea (cross-platform,
 # a differenza del vecchio path hardcoded "/tmp" che non esiste su Windows),
@@ -425,10 +483,7 @@ class Toolchain:
             (tmp / "src" / "main" / "scala" / f"{stem}.scala").write_text(
                 chisel_code, encoding="utf-8"
             )
-            result = subprocess.run(
-                ["sbt", "compile"],
-                cwd=tmp, capture_output=True, text=True, timeout=180, shell=True
-            )
+            result = self._run_sbt(["compile"], tmp, timeout=180, via_wsl=False)
             output  = (result.stdout + result.stderr).strip()
             success = result.returncode == 0
             return success, output
@@ -448,8 +503,8 @@ class Toolchain:
         if not self.sbt_available:
             return True, "sbt non trovato — esecuzione test saltata"
         if not self.verilator_available:
-            return True, ("verilator non trovato nel PATH — esecuzione test saltata "
-                           "(richiesto dal backend VerilatorBackendAnnotation del testbench)")
+            return True, ("verilator non trovato (né nativamente né in WSL) — esecuzione test "
+                           "saltata (richiesto dal backend VerilatorBackendAnnotation del testbench)")
 
         tmp = self._new_project(stem)
         try:
@@ -462,9 +517,8 @@ class Toolchain:
                 testbench_code, encoding="utf-8"
             )
 
-            result = subprocess.run(
-                ["sbt", "test"],
-                cwd=tmp, capture_output=True, text=True, timeout=300, shell=True
+            result = self._run_sbt(
+                ["test"], tmp, timeout=300, via_wsl=self.use_wsl_verilator
             )
             output  = (result.stdout + result.stderr).strip()
             success = result.returncode == 0
@@ -747,7 +801,7 @@ def run_verilator_loop(
         info("sbt non disponibile — esecuzione test su Verilator saltata")
         return code, []
     if not toolchain.verilator_available:
-        info("verilator non trovato nel PATH — esecuzione test saltata "
+        info("verilator non trovato (né nativamente né in WSL) — esecuzione test saltata "
              "(installa Verilator per la verifica funzionale reale)")
         return code, []
 
@@ -1074,9 +1128,12 @@ def main():
              "(installa sbt da https://www.scala-sbt.org per compilazione reale)")
 
     if toolchain.sbt_available and toolchain.verilator_available:
-        ok("verilator trovato → esecuzione reale dei test in simulazione abilitata")
+        if toolchain.use_wsl_verilator:
+            ok("verilator trovato in WSL → test eseguiti tramite bridge wsl.exe (sbt test)")
+        else:
+            ok("verilator trovato → esecuzione reale dei test in simulazione abilitata")
     elif toolchain.sbt_available:
-        info("verilator non trovato nel PATH → esecuzione test saltata  "
+        info("verilator non trovato (né nativamente né in WSL) → esecuzione test saltata  "
              "(su Windows installalo tramite WSL o MSYS2/Cygwin)")
 
     hr()
