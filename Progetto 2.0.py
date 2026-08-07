@@ -97,6 +97,41 @@ Schema JSON richiesto:
   "sottrazione_bias": "true|false|non_applicabile — obbligatorio true per moltiplicatori",
   "note_mxfp4": "OBBLIGATORIO: includi la dichiarazione di scope (solo elemento E2M1, nessun block-scaling a 32 elementi/E8M0) più le scelte su subnormali/bias/arrotondamento"
 }
+
+ESEMPIO COMPLETO (per un moltiplicatore — segui ESATTAMENTE questa forma,
+in particolare "tipo": "MXFP4" per ogni ingresso/uscita in formato E2M1;
+NON inventare schemi alternativi come campi "mantissa"/"exponent" separati
+con larghezze a piacere, NON usare "tipo": "binary" — il formato MXFP4
+E2M1 è SEMPRE un singolo segnale a 4 bit con i tre campi sign/exp/mant,
+mai due segnali separati con larghezze diverse):
+{
+  "nome_modulo": "MXFP4Multiplier",
+  "tipo": "combinatorio",
+  "descrizione": "Moltiplicatore MXFP4 E2M1: prodotto di due valori a 4 bit con sottrazione del bias e saturazione in overflow",
+  "ingressi": [
+    {"nome": "a", "tipo": "MXFP4", "bit": 4, "descrizione": "primo operando E2M1"},
+    {"nome": "b", "tipo": "MXFP4", "bit": 4, "descrizione": "secondo operando E2M1"}
+  ],
+  "uscite": [
+    {"nome": "prod", "tipo": "MXFP4", "bit": 4, "descrizione": "prodotto E2M1, saturato a +-6.0 in overflow"}
+  ],
+  "segnali_interni": [
+    {"nome": "mant_prod", "tipo": "UInt", "bit": 4, "descrizione": "prodotto delle mantisse estese col bit implicito"},
+    {"nome": "exp_sum", "tipo": "UInt", "bit": 3, "descrizione": "somma degli esponenti prima della sottrazione del bias"}
+  ],
+  "passi_algoritmo": [
+    "1. Estrai segno (XOR), esponente e mantissa di a e b",
+    "2. Bit implicito: 0 se esponente==0 (subnormale), 1 altrimenti",
+    "3. Moltiplica le mantisse estese col bit implicito",
+    "4. Somma gli esponenti e sottrai il bias (1)",
+    "5. Normalizza il prodotto e arrotonda a 1 bit di mantissa",
+    "6. Satura a +-6.0 (0b0111/0b1111) se l'esponente normalizzato eccede il massimo rappresentabile"
+  ],
+  "bundle_mxfp4_necessario": true,
+  "gestione_subnormali": "bit implicito 0 quando exp==0 su entrambi gli operandi",
+  "sottrazione_bias": "true",
+  "note_mxfp4": "Implementazione a livello di singolo elemento E2M1; nessun block-scaling E8M0/32 elementi (fuori scope)."
+}
 """
 
 SYSTEM_CODER = """\
@@ -705,7 +740,7 @@ def run_planner(spec: str, agent: Agent) -> dict:
            f"Uscite: {len(plan.get('uscite', []))}")
         if plan.get("passi_algoritmo"):
             ok(f"Algoritmo: {len(plan['passi_algoritmo'])} passi pianificati")
-        if not plan.get("ingressi") or not plan.get("uscite"):
+        if not plan.get("ingressi") or not plan.get("uscite") or not _plan_usa_mxfp4(plan):
             _save_planner_debug(raw)
         return plan
 
@@ -714,6 +749,19 @@ def run_planner(spec: str, agent: Agent) -> dict:
     return {"nome_modulo": "MxFp4Unit", "tipo": "combinatorio",
             "descrizione": spec, "raw_plan": raw,
             "ingressi": [], "uscite": [], "passi_algoritmo": []}
+
+
+def _plan_usa_mxfp4(plan: dict) -> bool:
+    """Controlla che almeno un ingresso o un'uscita dichiari esplicitamente
+    tipo MXFP4. Si è osservato in pratica che alcuni modelli, pur avendo
+    ingressi/uscite non vuoti, inventano uno schema alternativo (es. campi
+    "mantissa"/"exponent" separati con tipo "binary" e larghezze a
+    piacere) invece di seguire il formato E2M1 richiesto: un piano del
+    genere è vuoto ai fini pratici quanto uno con ingressi/uscite assenti,
+    e va intercettato allo stesso modo invece di lasciarlo proseguire."""
+    campi = list(plan.get("ingressi") or []) + list(plan.get("uscite") or [])
+    return any(isinstance(c, dict) and str(c.get("tipo", "")).upper() == "MXFP4"
+               for c in campi)
 
 
 def _save_planner_debug(raw: str) -> None:
@@ -1378,6 +1426,18 @@ def main():
         info("Suggerimento: riprova con --model deepseek-coder oppure "
              "--model qwen2.5-coder (seguono meglio le istruzioni di "
              "formato rispetto a modelli generalisti più piccoli).")
+        sys.exit(1)
+
+    if not _plan_usa_mxfp4(plan):
+        err("Il piano non contiene alcun ingresso/uscita con tipo "
+            "\"MXFP4\": il modello ha probabilmente inventato uno schema "
+            "diverso (es. campi 'mantissa'/'exponent' separati con "
+            "larghezze a piacere) invece del formato E2M1 richiesto. "
+            "Controlla planner_debug_*.txt.")
+        info("Suggerimento: riformula la specifica menzionando "
+             "esplicitamente 'formato MXFP4 E2M1 (segno, 2 bit esponente, "
+             "1 bit mantissa)' invece di descrivere l'operazione in "
+             "astratto, e/o riprova con un altro modello.")
         sys.exit(1)
 
     stem_safe = re.sub(r"[^a-zA-Z0-9_]", "_",
