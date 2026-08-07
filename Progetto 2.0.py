@@ -482,11 +482,20 @@ def extract_scala_code(text: str) -> str:
     text = re.sub(r"```scala|```", "", text)
     lines = text.splitlines()
 
-    start_idx = None
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*import\s+chisel3", line):
-            start_idx = i
-            break
+# Se il modello scrive più tentativi in sequenza (spiega, mostra codice,
+# spiega di nuovo, riscrive tutto il codice corretto) — osservato in
+# pratica — ogni tentativo tende a ripartire da "import chisel3". In quel
+# caso l'ultima occorrenza è la versione finale/corretta: le precedenti
+# sono bozze superate e vanno scartate, non concatenate.
+# Ancora specifica: "import chisel3._" esatto (non "import chisel3.util._",
+# che è il secondo import dello stesso blocco, non l'inizio di un nuovo
+# tentativo). Cercare "import\s+chisel3" in modo generico avrebbe incluso
+# anche "import chisel3.util._" tra le occorrenze, rompendo il caso
+# normale di un unico file con entrambi gli import.
+    import_idxs = [i for i, line in enumerate(lines)
+                   if re.match(r"^\s*import\s+chisel3\._\s*$", line)]
+    start_idx = import_idxs[-1] if import_idxs else None
+
     if start_idx is None:
         for i, line in enumerate(lines):
             if re.match(r"^\s*(class|object|trait)\s+\w+", line):
