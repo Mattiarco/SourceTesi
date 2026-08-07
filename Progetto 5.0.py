@@ -192,10 +192,16 @@ REGOLE OBBLIGATORIE:
    ".withAnnotations(Seq(VerilatorBackendAnnotation))": i test devono
    girare su simulazione Verilator, non sul backend di default.
 2. NON ridefinire "class MXFP4" o "object MXFP4": è già fornito da
-   "import mxfp4._" (Bundle con sign/exp/mant, più MXFP4.encode/decode
-   per convertire tra Double e bit MXFP4 nelle asserzioni).
-3. Per le asserzioni usa SEMPRE "dut.io.<segnale>.expect(valore.U)" (metodo
-   nativo di ChiselTest), MAI "assert(dut.io.<segnale>.peek().litValue() === ...)":
+   "import mxfp4._" (Bundle con sign/exp/mant). Per creare un valore MXFP4
+   letterale nei test usa "MXFP4(bits)" con i 4 bit codificati (0..15), es.
+   "dut.io.a.poke(MXFP4(3))" o "dut.io.sum.expect(MXFP4(5))" — NON
+   "MXFP4(bits).U" e NON passare un Double: MXFP4(bits) prende già i bit
+   codificati e ritorna un letterale del Bundle, pronto per poke/expect.
+   MXFP4.encode(Double)/decode(Int) restano disponibili per calcolare a mano
+   il valore atteso di un'operazione prima di passarlo a MXFP4(...).
+3. Per le asserzioni usa SEMPRE il metodo nativo "dut.io.<segnale>.expect(...)"
+   di ChiselTest (con "MXFP4(bits)" per segnali di tipo MXFP4, "valore.U" per
+   segnali UInt semplici), MAI "assert(dut.io.<segnale>.peek().litValue() === ...)":
    "litValue" è un valore, non un metodo, e chiamarlo con le parentesi
    "litValue()" causa l'errore di compilazione "BigInt does not take
    parameters" — un pattern che genera sempre questo errore, quindi va evitato
@@ -203,6 +209,11 @@ REGOLE OBBLIGATORIE:
 4. NON usare "chisel3.iotesters.PeekPokeTester" (API deprecata, rimossa da
    anni, incompatibile con questo progetto): SOLO ChiselTest/ScalaTest come
    nella struttura obbligatoria sopra (AnyFlatSpec + ChiselScalatestTester).
+5. NON ridichiarare "class NomeModulo extends Module { ... }": il modulo
+   esiste già in un file separato e ti viene passato come contesto, non va
+   ripetuto nel testbench. Usalo solo referenziandolo in "test(new NomeModulo)".
+   Ripeterne la definizione causa un errore di simbolo duplicato in
+   compilazione (il modulo verrebbe definito due volte in due file diversi).
 
 CASI DA TESTARE:
   • Caso base (valori tipici)
@@ -225,6 +236,7 @@ MXFP4_SCALA = """\
 package mxfp4
 
 import chisel3._
+import chisel3.experimental.BundleLiterals._
 
 // Formato MXFP4 E2M1 (OCP MX Specification v1.0): 4 bit totali.
 //   bit[3]   = segno      (0 = positivo, 1 = negativo)
@@ -241,6 +253,15 @@ class MXFP4 extends Bundle {
 // (poke/expect) e per gli agenti che generano i test.
 object MXFP4 {
   def apply(): MXFP4 = new MXFP4
+
+  // Costruisce un letterale MXFP4 dai 4 bit codificati (0..15), per poke/expect
+  // nei testbench: es. dut.io.a.poke(MXFP4(3)), dut.io.sum.expect(MXFP4(5)).
+  def apply(bits: Int): MXFP4 = {
+    val s = (bits >> 3) & 0x1
+    val e = (bits >> 1) & 0x3
+    val m = bits & 0x1
+    (new MXFP4).Lit(_.sign -> (s == 1).B, _.exp -> e.U(2.W), _.mant -> m.U(1.W))
+  }
 
   // Converte i 4 bit codificati (0..15) nel Double rappresentato.
   def decode(bits: Int): Double = {
@@ -809,6 +830,33 @@ def extract_scala_code(text: str) -> str:
 
     return code[:end].strip()
 
+# Il Tester a volte ri-genera per intero il modulo insieme alla classe di test
+# (nonostante SYSTEM_TESTER dica esplicitamente "rispondi con SOLO il
+# testbench"), producendo un simbolo duplicato in compilazione: il modulo
+# esiste già nel suo file separato (src/main/scala). Rimuove quella
+# ridefinizione accidentale dal testo del testbench con la stessa logica di
+# bilanciamento delle graffe di extract_scala_code, lasciando intatto il
+# resto (import, classe di test).
+def strip_duplicate_module(text: str, module_name: str) -> str:
+    if not module_name:
+        return text
+    pattern = re.compile(r"class\s+" + re.escape(module_name) + r"\b[^\n{]*\{")
+    m = pattern.search(text)
+    if not m:
+        return text
+
+    depth = 0
+    i = m.end() - 1  # indice della graffa di apertura
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return (text[:m.start()] + text[i + 1:]).strip()
+        i += 1
+    return text  # graffe non bilanciate: non tocco nulla per sicurezza
+
 # Il Planner a volte ignora lo schema JSON richiesto e ne inventa uno proprio
 # (osservato più volte: "unit_name"/"inputs"/"outputs"/"logic_steps" invece di
 # "nome_modulo"/"ingressi"/"uscite"/"passi_algoritmo") — limite comune nei
@@ -1135,6 +1183,10 @@ def run_tester(code: str, plan: dict, agent: Agent, temperature: float = 0.1) ->
         temperature=temperature
     )
     tb = extract_scala_code(tb)
+    tb_pulito = strip_duplicate_module(tb, plan.get("nome_modulo", ""))
+    if tb_pulito != tb:
+        warn("Il Tester ha ridefinito il modulo nel testbench — rimossa la duplicazione")
+        tb = tb_pulito
     ok(f"Testbench generato: {len(tb)} caratteri")
     return tb
 
