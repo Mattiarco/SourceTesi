@@ -309,6 +309,15 @@ def info(msg: str):
 def hr():
     print(f"{DIM}{'─' * 68}{RESET}")
 
+# Ritorna la coda di un output di sbt, non la testa. sbt stampa sempre prima il
+# boilerplate di avvio/risoluzione dipendenze (spesso migliaia di caratteri, in
+# particolare la prima volta che gira in una cache WSL vuota) e solo alla fine
+# gli "[error]" veri e il riepilogo del fallimento: troncare con [:N] mostra
+# quindi quasi sempre solo "welcome to sbt... loading project..." e mai
+# l'errore reale, sia nel report sia (peggio) nel prompt dato al Fixer.
+def tail(text: str, n: int) -> str:
+    return text[-n:] if len(text) > n else text
+
 
 # Api per ollama. Ollama_get() ritorna il JSON o None se non raggiungibile. Ollama_chat() gestisce la chat multi-turn con history e system prompt.
 def ollama_get(url: str, timeout: int = 5):
@@ -621,6 +630,57 @@ def extract_scala_code(text: str) -> str:
 
     return code[:end].strip()
 
+# Il Planner a volte ignora lo schema JSON richiesto e ne inventa uno proprio
+# (osservato più volte: "unit_name"/"inputs"/"outputs"/"logic_steps" invece di
+# "nome_modulo"/"ingressi"/"uscite"/"passi_algoritmo") — limite comune nei
+# modelli locali più piccoli. Senza normalizzazione questo passa inosservato:
+# 'plan.get("nome_modulo", "MxFp4Unit")' ricade silenziosamente sul default,
+# quindi i file vengono salvati con un nome che non corrisponde al modulo
+# scritto dal Coder, e "Algoritmo pianificato" nel report resta vuoto. Qui si
+# aggiungono le chiavi attese come alias di quelle trovate, senza toccare il
+# resto del piano (che arriva comunque per intero a Coder/Tester via JSON).
+def _normalize_plan(plan: dict, spec: str) -> dict:
+    aliases = {
+        "nome_modulo":    ["unit_name", "module_name", "name"],
+        "tipo":           ["type"],
+        "descrizione":    ["description"],
+        "ingressi":       ["inputs"],
+        "uscite":         ["outputs"],
+        "segnali_interni": ["internal_signals", "signals"],
+        "passi_algoritmo": ["logic_steps", "algorithm_steps", "steps", "components"],
+    }
+    for expected, alts in aliases.items():
+        if plan.get(expected):
+            continue
+        for alt in alts:
+            if plan.get(alt):
+                plan[expected] = plan[alt]
+                break
+
+    if not plan.get("nome_modulo"):
+        plan["nome_modulo"] = "MxFp4Unit"
+    if not plan.get("descrizione"):
+        plan["descrizione"] = spec
+
+# I "passi" a volte arrivano come lista di dict invece che di stringhe, sia in
+# forma {"step_name"/"name": ..., "description": ...} sia (via l'alias
+# "components") in forma {"name": ..., "type": ..., "inputs": [...], "outputs": [...]}:
+# il report si aspetta stringhe da elencare puntate.
+    steps = plan.get("passi_algoritmo") or []
+    if steps and isinstance(steps[0], dict):
+        def _step_to_str(s: dict) -> str:
+            label = s.get("step_name") or s.get("name") or "?"
+            if s.get("description"):
+                return f"{label}: {s['description']}"
+            if s.get("type"):
+                ins  = ", ".join(s.get("inputs", []))
+                outs = ", ".join(s.get("outputs", []))
+                return f"{label} ({s['type']}): {ins} → {outs}"
+            return str(label)
+        plan["passi_algoritmo"] = [_step_to_str(s) for s in steps]
+
+    return plan
+
 # Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato.
 # Il piano include nome modulo, ingressi/uscite, algoritmo e segnali interni. Questo piano è poi usato dal Coder come base per la generazione del codice Chisel.
 def run_planner(spec: str, agent: Agent) -> dict:
@@ -639,6 +699,7 @@ def run_planner(spec: str, agent: Agent) -> dict:
 
     try:
         plan = json.loads(clean)
+        plan = _normalize_plan(plan, spec)
         ok(f"Modulo: '{plan.get('nome_modulo', '?')}'  —  "
            f"tipo: {plan.get('tipo', '?')}")
         ok(f"Ingressi: {len(plan.get('ingressi', []))}  |  "
@@ -711,17 +772,17 @@ def run_review_fix_loop(
                 ok("sbt compile: OK")
             else:
                 warn("sbt compile: ERRORI")
-                print(f"  {DIM}{compile_out[:300]}…{RESET}")
+                print(f"  {DIM}…{tail(compile_out, 300)}{RESET}")
         else:
             info("sbt non disponibile — solo revisione LLM")
 
-# Log iterazione. 
+# Log iterazione.
         log_entry: dict = {
             "iterazione":      i,
             "review_llm":      review_result,
             "review_llm_pass": passed_llm,
             "compile_ok":      compile_ok,
-            "compile_output":  compile_out[:600] if compile_out else "",
+            "compile_output":  tail(compile_out, 1200) if compile_out else "",
             "fix_applicato":   False,
             "esito":           "",
         }
@@ -749,7 +810,8 @@ def run_review_fix_loop(
             fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
         if not compile_ok and toolchain.sbt_available:
             fix_prompt += (
-                f"Errori di compilazione sbt:\n{compile_out[:1000]}\n\n"
+                f"Errori di compilazione sbt (coda dell'output, dove sbt "
+                f"stampa gli '[error]' veri):\n{tail(compile_out, 2500)}\n\n"
             )
         fix_prompt += (
             "Correggi TUTTI i problemi elencati e restituisci "
@@ -815,12 +877,12 @@ def run_verilator_loop(
             ok("sbt test (Verilator): OK")
         else:
             warn("sbt test (Verilator): FALLITO")
-            print(f"  {DIM}{test_out[:300]}…{RESET}")
+            print(f"  {DIM}…{tail(test_out, 300)}{RESET}")
 
         log_entry: dict = {
             "iterazione":        i,
             "verilator_ok":      test_ok,
-            "verilator_output":  test_out[:600] if test_out else "",
+            "verilator_output":  tail(test_out, 1200) if test_out else "",
             "fix_applicato":     False,
             "esito":             "",
         }
@@ -844,7 +906,9 @@ def run_verilator_loop(
             f"Codice del modulo:\n{code}\n\n"
             f"Testbench (NON modificabile, deve restare compatibile con l'io del modulo):\n"
             f"{testbench}\n\n"
-            f"Errore da 'sbt test' in simulazione Verilator:\n{test_out[:1500]}\n\n"
+            f"Errore da 'sbt test' in simulazione Verilator (coda dell'output, "
+            f"dove sbt stampa gli '[error]' veri e il riepilogo dei test "
+            f"falliti):\n{tail(test_out, 2500)}\n\n"
             "Correggi il modulo Chisel affinché compili insieme al testbench "
             "e la simulazione su Verilator passi. Restituisci SOLO il codice "
             "completo e corretto del modulo (non il testbench)."
