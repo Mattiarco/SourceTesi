@@ -44,6 +44,15 @@ CONTESTO MXFP4:
   • Shared exponent per blocchi di 32 elementi (OCP MX Specification v1.0)
   • Usato in acceleratori ML per ridurre area e banda
 
+IMPORTANTE — se l'operazione richiesta è un'addizione tra valori MXFP4: NON
+pianificare porte logiche elementari (XOR/AND/OR a livello di bit grezzi,
+come per un full adder binario classico) come "components" — sommare due
+codifiche MXFP4 non è la stessa cosa che sommare due numeri binari, perché
+MXFP4 è una codifica floating-point-like (segno/esponente/mantissa). I passi
+corretti sono: decodifica dei campi, allineamento in virgola fissa, somma con
+segno, normalizzazione/saturazione e ricodifica — pianifica "passi_algoritmo"
+in questi termini, non come porte XOR/AND/OR.
+
 Il tuo compito è produrre un piano di implementazione strutturato in JSON.
 Rispondi SOLO con il JSON valido. Nessun testo prima o dopo. Nessun markdown.
 
@@ -81,8 +90,14 @@ REGOLE OBBLIGATORIE:
    Terza riga: import mxfp4._
 2. Il Bundle MXFP4 (sign: Bool, exp: UInt(2.W), mant: UInt(1.W)) è GIÀ
    DEFINITO nel package mxfp4 fornito dal toolchain (MXFP4.scala).
-   NON ridefinire mai "class MXFP4" o "object MXFP4": usalo solo tramite
-   l'import di cui sopra (es. val a = Input(new MXFP4)).
+   NON ridefinire mai "class MXFP4" o "object MXFP4". Esistono DUE forme
+   distinte di "MXFP4(...)", NON intercambiabili:
+     - "new MXFP4" o "MXFP4()" (senza argomenti) = TEMPLATE DI TIPO, usalo
+       SOLO per dichiarare porte/segnali: "Input(new MXFP4)", "Wire(new MXFP4)".
+     - "MXFP4(bits)" (un Int 0..15, i 4 bit codificati) = VALORE LETTERALE
+       COSTANTE, usalo SOLO per assegnare/confrontare un valore concreto
+       (es. "io.out := MXFP4(0xF)" per saturare a -6.0). MAI "Input(MXFP4(bits))"
+       né "new MXFP4(bits)": non sono validi, causano errori di compilazione.
 3. Ogni modulo Chisel estende Module e ha un val io = IO(new Bundle { ... })
 4. Usa := per assegnazioni, non =
 5. I segnali Wire si dichiarano con: val nome = Wire(UInt(N.W))
@@ -90,11 +105,61 @@ REGOLE OBBLIGATORIE:
 7. Commenta ogni blocco logico in italiano (utile per la tesi)
 8. Nessuna libreria esterna oltre a chisel3 e al package mxfp4 fornito
 9. Il codice deve essere COMPLETO e COMPILABILE
-10. Le porte logiche elementari (XOR, AND, OR, NOT) si scrivono SEMPRE con gli
-    operatori Chisel diretti sugli operandi (^, &, |, !), MAI istanziando
-    "Module(new XOR)"/"Module(new AND)"/"Module(new OR)": queste classi non
-    esistono e non vanno create — es. "val sum_xor = io.a ^ io.b", non
-    "val sum_xor = Module(new XOR)".
+10. Le porte logiche elementari (XOR, AND, OR, NOT) su segnali UInt/Bool
+    semplici si scrivono SEMPRE con gli operatori Chisel diretti (^, &, |, !),
+    MAI istanziando "Module(new XOR)" ecc: queste classi non esistono.
+    ATTENZIONE: questo vale SOLO per segnali UInt/Bool. Un segnale di tipo
+    MXFP4 è un Bundle e NON ha operatori ^/&/| (causa l'errore di
+    compilazione "value ^ is not a member of mxfp4.MXFP4"): per combinare
+    due segnali MXFP4 usa SEMPRE l'algoritmo di addizione del punto 11, mai
+    operatori bitwise diretti su un intero Bundle MXFP4.
+11. ADDIZIONE MXFP4: quando la specifica chiede di sommare due valori MXFP4,
+    NON usare XOR/AND/OR sui bit grezzi (non è un'addizione floating-point
+    valida). Usa questo algoritmo, già validato (compila con sbt e produce
+    lo stesso risultato di un modello di riferimento round-to-nearest su
+    tutte le 256 combinazioni possibili di operandi MXFP4): decodifica in
+    virgola fissa a scala "×2" (rappresenta esattamente gli 8 valori
+    rappresentabili 0/0.5/1/1.5/2/3/4/6 come interi 0/1/2/3/4/6/8/12, senza
+    perdita di precisione), somma con segno, poi arrotonda/satura e ricodifica:
+
+      def magX2(exp: UInt, mant: UInt): UInt =
+        Mux(exp === 0.U, mant, (2.U +& mant) << (exp - 1.U))
+
+      val a_mag = magX2(io.a.exp, io.a.mant)
+      val b_mag = magX2(io.b.exp, io.b.mant)
+      val a_signed = Mux(io.a.sign, 0.S -& a_mag.zext, a_mag.zext)
+      val b_signed = Mux(io.b.sign, 0.S -& b_mag.zext, b_mag.zext)
+      val sum_signed = a_signed +& b_signed
+      val out_sign = sum_signed < 0.S
+      val sum_abs  = sum_signed.abs.asUInt
+
+      val out_exp  = Wire(UInt(2.W))
+      val out_mant = Wire(UInt(1.W))
+      when (sum_abs >= 11.U) {
+        out_exp := 3.U; out_mant := 1.U   // 6.0 (satura/arrotonda)
+      }.elsewhen (sum_abs >= 8.U) {
+        out_exp := 3.U; out_mant := 0.U   // 4.0
+      }.elsewhen (sum_abs >= 6.U) {
+        out_exp := 2.U; out_mant := 1.U   // 3.0
+      }.elsewhen (sum_abs >= 4.U) {
+        out_exp := 2.U; out_mant := 0.U   // 2.0
+      }.elsewhen (sum_abs >= 3.U) {
+        out_exp := 1.U; out_mant := 1.U   // 1.5
+      }.elsewhen (sum_abs >= 2.U) {
+        out_exp := 1.U; out_mant := 0.U   // 1.0
+      }.elsewhen (sum_abs >= 1.U) {
+        out_exp := 0.U; out_mant := 1.U   // 0.5
+      }.otherwise {
+        out_exp := 0.U; out_mant := 0.U   // 0
+      }
+      // <segnale_uscita>.sign := out_sign
+      // <segnale_uscita>.exp  := out_exp
+      // <segnale_uscita>.mant := out_mant
+
+    Adatta i nomi dei segnali (io.a/io.b) alla specifica. Se la specifica ha
+    più di due operandi MXFP4 (es. un "full adder" con A, B, Cin), applica
+    l'algoritmo in sequenza: prima somma i primi due, poi somma il risultato
+    con il terzo.
 
 Rispondi con SOLO il codice Scala/Chisel.
 Non usare markdown (no ```), nessun testo prima o dopo il codice.
@@ -114,7 +179,14 @@ CHECKLIST DA VERIFICARE:
   [ ] Wire dichiarati prima dell'uso
   [ ] Parentesi graffe bilanciate
   [ ] Nessuna sintassi Scala non supportata in Chisel 3
-  [ ] Logica MXFP4 corretta (estrazione bit, allineamento esponenti, ecc.)
+  [ ] Nessun operatore ^/&/| usato direttamente su un segnale di tipo MXFP4
+      (è un Bundle, non ha operatori bitwise — errore "value ^ is not a
+      member of mxfp4.MXFP4"): l'addizione tra valori MXFP4 deve decodificare
+      i campi, allineare, sommare con segno e ricodificare, non usare XOR/AND/OR
+      sui bit grezzi
+  [ ] "MXFP4(bits)" (con un Int) usato SOLO per valori letterali costanti, MAI
+      per dichiarare porte/segnali ("Input(MXFP4(bits))" o "new MXFP4(bits)"
+      sono entrambi errati — per le porte serve "new MXFP4"/"MXFP4()" senza argomenti)
   [ ] Nessun import o riferimento a librerie inesistenti (oltre a chisel3 e mxfp4)
 
 REGOLA IMPORTANTE: la checklist sopra è la SOLA base per dire ISSUES. Se il
@@ -148,10 +220,17 @@ REGOLE:
 5. Rispetta le stesse regole del Coder:
    - import chisel3._, chisel3.util._ e mxfp4._
    - Bundle MXFP4 (sign/exp/mant) SOLO importato da mxfp4._, mai ridefinito
+   - "new MXFP4"/"MXFP4()" per dichiarare porte/segnali (template di tipo),
+     "MXFP4(bits)" con un Int SOLO per valori letterali costanti — mai
+     "Input(MXFP4(bits))" né "new MXFP4(bits)"
    - := per assegnazioni
    - Commenti in italiano
-   - Porte logiche elementari (XOR/AND/OR/NOT) con operatori diretti (^, &, |, !),
-     MAI "Module(new XOR)"/"Module(new AND)"/"Module(new OR)": non esistono
+   - Porte logiche elementari (XOR/AND/OR/NOT) con operatori diretti (^, &, |, !)
+     SOLO su segnali UInt/Bool, MAI "Module(new XOR)" ecc (non esistono). Un
+     segnale MXFP4 è un Bundle senza operatori ^/&/|: per sommare due valori
+     MXFP4 usa l'algoritmo decodifica-in-fixed-point/somma/arrotonda-satura
+     del Coder (scala ×2: 0/0.5/1/1.5/2/3/4/6 → 0/1/2/3/4/6/8/12), mai XOR/
+     AND/OR sui bit grezzi codificati
 6. Se gli errori derivano da un'esecuzione di test falliti su Verilator
    (compilazione o simulazione), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
@@ -268,12 +347,15 @@ object MXFP4 {
     val sign = (bits >> 3) & 0x1
     val exp  = (bits >> 1) & 0x3
     val mant = bits & 0x1
-    if (exp == 0 && mant == 0) {
-      0.0
+    val s = if (sign == 1) -1.0 else 1.0
+    if (exp == 0) {
+      // Subnormale (include lo zero): NESSUN bit implicito, esponente
+      // effettivo = 1 - bias = 0. (bits=0001 -> 0.5, non 0.75: senza
+      // bit implicito la mantissa vale mant*0.5, non (1+mant*0.5)).
+      s * mant * 0.5
     } else {
-      val s = if (sign == 1) -1.0 else 1.0
-      val m = 1.0 + mant * 0.5
-      s * m * math.pow(2.0, exp - 1)
+      // Normale: bit implicito 1, esponente effettivo = exp - bias.
+      s * (1.0 + mant * 0.5) * math.pow(2.0, exp - 1)
     }
   }
 
@@ -477,6 +559,23 @@ CHISEL_KNOWLEDGE_BASE = [
                  "ChiselScalatestTester' e 'test(new NomeModulo).withAnnotations(Seq("
                  "VerilatorBackendAnnotation)) { dut => ... }', con 'dut.io.X.poke(...)' e "
                  "'dut.io.X.expect(...)'."),
+    },
+    {
+        "triggers": ["value ^ is not a member of mxfp4", "value & is not a member of mxfp4",
+                     "value | is not a member of mxfp4"],
+        "hint": ("Un segnale di tipo MXFP4 è un Bundle: NON ha operatori bitwise ^/&/| "
+                 "(quelli esistono solo su UInt/SInt). Per sommare due valori MXFP4 non si "
+                 "usano XOR/AND/OR sui bit grezzi: bisogna decodificare i campi (exp/mant) in "
+                 "virgola fissa a scala ×2, sommare con segno, poi arrotondare/saturare e "
+                 "ricodificare — l'algoritmo completo è descritto nel punto 11 delle regole."),
+    },
+    {
+        "triggers": ["no arguments allowed for nullary constructor mxfp4",
+                     "not enough arguments for method apply"],
+        "hint": ("'new MXFP4(bits)' non è valido: il costruttore della classe MXFP4 non prende "
+                 "argomenti. Per un template di tipo (porte/segnali) usa 'new MXFP4' o 'MXFP4()' "
+                 "senza argomenti; per un valore letterale costante usa 'MXFP4(bits)' — la "
+                 "funzione apply(bits: Int) del companion object, non il costruttore della classe."),
     },
 ]
 
