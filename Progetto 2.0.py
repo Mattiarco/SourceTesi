@@ -674,9 +674,29 @@ def run_coder(plan: dict, spec: str, agent: Agent) -> str:
 
 # Terzo e quarto agente: Reviewer e Fixer lavorano in un loop. 
 # Il Reviewer valuta il codice generato, se ci sono problemi il Fixer li corregge. Questo ciclo si ripete fino a quando il codice passa la revisione o si raggiunge il numero massimo di iterazioni.
+# Controllo strutturale deterministico (non dipende dall'LLM): se il piano
+# richiede segnali di tipo MXFP4, il codice DEVE definire il Bundle MXFP4
+# con i tre campi sign/exp/mant. È il requisito più fondamentale di tutti
+# (senza non si sta generando un'unità MXFP4, punto), quindi non può
+# dipendere dal fatto che un Reviewer LLM se ne accorga o meno — si è
+# osservato in pratica che alcuni modelli continuano a dare feedback
+# stilistico anche quando questo requisito di base manca del tutto.
+def mxfp4_bundle_mancante(plan: dict, code: str) -> bool:
+    richiede_mxfp4 = any(
+        isinstance(x, dict) and str(x.get("tipo", "")).upper() == "MXFP4"
+        for x in list(plan.get("ingressi") or []) + list(plan.get("uscite") or [])
+    )
+    if not richiede_mxfp4:
+        return False
+    has_bundle = bool(re.search(r"class\s+MXFP4\s+extends\s+Bundle", code))
+    has_fields = all(re.search(rf"\b{f}\b", code) for f in ("sign", "exp", "mant"))
+    return not (has_bundle and has_fields)
+
+
 def run_review_fix_loop(
     code:      str,
     spec:      str,
+    plan:      dict,
     reviewer:  Agent,
     fixer:     Agent,
     compiler:  SbtCompiler,
@@ -738,11 +758,25 @@ def run_review_fix_loop(
 # affidabile, su questo aspetto, di un LLM che non rispetta il formato
 # richiesto — e viene usato qui come rete di sicurezza per non sprecare
 # iterazioni su un codice già valido dal punto di vista Chisel/Scala.
+#
+# ATTENZIONE: sbt compila con successo anche codice che ha abbandonato del
+# tutto MXFP4 (es. un full adder booleano con porte UInt semplici) — la
+# compilazione riuscita prova solo la correttezza sintattica Scala/Chisel,
+# non la conformità al formato. Per questo, indipendentemente da PASS del
+# Reviewer o dalla compilazione, il Bundle MXFP4 deve essere presente ogni
+# volta che il piano lo richiede: è un controllo deterministico che non
+# dipende dal fatto che un Reviewer LLM se ne accorga.
+        bundle_ok = not mxfp4_bundle_mancante(plan, code)
+        if not bundle_ok:
+            warn("Controllo strutturale: il piano richiede segnali MXFP4 ma "
+                 "il codice non definisce il Bundle MXFP4 (sign/exp/mant) — "
+                 "blocco indipendente dal Reviewer/da sbt")
+
         accettato_per_compilazione_stabile = (
             not passed_llm and compiler.available
-            and compile_ok and compile_ok_streak >= 2
+            and compile_ok and compile_ok_streak >= 2 and bundle_ok
         )
-        tutto_ok = passed_llm or accettato_per_compilazione_stabile
+        tutto_ok = (passed_llm and bundle_ok) or accettato_per_compilazione_stabile
 
         if tutto_ok:
             if accettato_per_compilazione_stabile:
@@ -767,6 +801,16 @@ def run_review_fix_loop(
         agent_step("FIXER", f"Correzione automatica (iterazione {i})")
 
         fix_prompt = f"Codice con problemi:\n{code}\n\n"
+        if not bundle_ok:
+            fix_prompt += (
+                "PROBLEMA BLOCCANTE (controllo automatico, non del Reviewer): "
+                "il piano richiede segnali di tipo MXFP4 ma il codice non "
+                "definisce il Bundle MXFP4 con i campi sign (Bool), "
+                "exp (UInt(2.W)), mant (UInt(1.W)), oppure non lo usa per "
+                "gli ingressi/uscite dichiarati MXFP4. Aggiungilo e usalo: "
+                "un'unità che manipola solo UInt/Bool grezzi non è "
+                "un'unità MXFP4.\n\n"
+            )
         if not passed_llm:
             fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
         if not compile_ok and compiler.available:
@@ -1262,7 +1306,7 @@ def main():
     code      = run_coder(plan, spec, coder)
 
     code, iter_log = run_review_fix_loop(
-        code, spec, reviewer, fixer,
+        code, spec, plan, reviewer, fixer,
         compiler, stem_safe, args.iter
     )
 
