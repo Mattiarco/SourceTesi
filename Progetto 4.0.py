@@ -518,7 +518,56 @@ def get_specification(file_arg: str | None, spec_arg: str | None) -> str:
     ok(f"Specifica acquisita ({len(spec)} caratteri)")
     return spec
 
-# Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato. 
+# Estrae codice Scala da una risposta LLM che potrebbe non rispettare l'istruzione
+# "solo codice, nessun markdown, nessun testo prima o dopo" — un limite comune nei
+# modelli locali più piccoli. Un semplice re.sub(r"```scala|```", "", txt) toglie
+# solo i marcatori di fence e lascia la prosa attorno intatta (producendo un .scala
+# non compilabile); questa funzione isola il codice vero e proprio:
+#   1. se c'è un blocco fenced ```scala/``` che contiene codice Chisel riconoscibile,
+#      usa quello (l'ultimo, se ce n'è più di uno);
+#   2. altrimenti parte dalla prima riga "import chisel3" e taglia alla chiusura
+#      bilanciata dell'ultima dichiarazione top-level (class/object/trait), così
+#      eventuali spiegazioni testuali dopo il codice vengono scartate.
+def extract_scala_code(text: str) -> str:
+    text = text.strip()
+
+    fences = re.findall(r"```(?:scala)?\s*\n?(.*?)```", text, re.DOTALL)
+    scala_fences = [
+        f.strip() for f in fences
+        if "import chisel3" in f or "extends Module" in f or "extends Bundle" in f
+    ]
+    if scala_fences:
+        return scala_fences[-1]
+    if fences:
+        return fences[-1].strip()
+
+    start = text.find("import chisel3")
+    if start == -1:
+        return text
+
+    code = text[start:]
+    top_level_kw = ("class ", "object ", "trait ", "import ", "package ")
+    depth = 0
+    seen_brace = False
+    end = len(code)
+
+    for i, ch in enumerate(code):
+        if ch == "{":
+            depth += 1
+            seen_brace = True
+        elif ch == "}":
+            depth -= 1
+            if depth <= 0 and seen_brace:
+                rest = code[i + 1:].lstrip("\n\r \t")
+                if not any(rest.startswith(kw) for kw in top_level_kw):
+                    end = i + 1
+                    break
+                depth = 0
+                seen_brace = False
+
+    return code[:end].strip()
+
+# Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato.
 # Il piano include nome modulo, ingressi/uscite, algoritmo e segnali interni. Questo piano è poi usato dal Coder come base per la generazione del codice Chisel.
 def run_planner(spec: str, agent: Agent) -> dict:
     agent_step("PLANNER", "Analisi della specifica → piano di implementazione JSON")
@@ -562,7 +611,7 @@ def run_coder(plan: dict, spec: str, agent: Agent) -> str:
     )
 
     code = agent.run(prompt)
-    code = re.sub(r"```scala|```", "", code).strip()
+    code = extract_scala_code(code)
 
     ok(f"Codice generato: {len(code)} caratteri, "
        f"{code.count(chr(10))+1} righe")
@@ -654,7 +703,7 @@ def run_review_fix_loop(
         )
 
         code = fixer.run(fix_prompt)
-        code = re.sub(r"```scala|```", "", code).strip()
+        code = extract_scala_code(code)
         ok(f"Codice corretto: {len(code)} caratteri")
 
         log_entry["fix_applicato"] = True
@@ -674,7 +723,7 @@ def run_tester(code: str, plan: dict, agent: Agent) -> str:
         "Genera il testbench ChiselTest completo.\n"
         "Ricorda: no markdown fence, solo codice Scala."
     )
-    tb = re.sub(r"```scala|```", "", tb).strip()
+    tb = extract_scala_code(tb)
     ok(f"Testbench generato: {len(tb)} caratteri")
     return tb
 
@@ -747,7 +796,7 @@ def run_verilator_loop(
             "completo e corretto del modulo (non il testbench)."
         )
         code = fixer.run(fix_prompt)
-        code = re.sub(r"```scala|```", "", code).strip()
+        code = extract_scala_code(code)
         ok(f"Codice corretto: {len(code)} caratteri")
 
         log_entry["fix_applicato"] = True
