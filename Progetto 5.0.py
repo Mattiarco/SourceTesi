@@ -90,6 +90,11 @@ REGOLE OBBLIGATORIE:
 7. Commenta ogni blocco logico in italiano (utile per la tesi)
 8. Nessuna libreria esterna oltre a chisel3 e al package mxfp4 fornito
 9. Il codice deve essere COMPLETO e COMPILABILE
+10. Le porte logiche elementari (XOR, AND, OR, NOT) si scrivono SEMPRE con gli
+    operatori Chisel diretti sugli operandi (^, &, |, !), MAI istanziando
+    "Module(new XOR)"/"Module(new AND)"/"Module(new OR)": queste classi non
+    esistono e non vanno create — es. "val sum_xor = io.a ^ io.b", non
+    "val sum_xor = Module(new XOR)".
 
 Rispondi con SOLO il codice Scala/Chisel.
 Non usare markdown (no ```), nessun testo prima o dopo il codice.
@@ -145,6 +150,8 @@ REGOLE:
    - Bundle MXFP4 (sign/exp/mant) SOLO importato da mxfp4._, mai ridefinito
    - := per assegnazioni
    - Commenti in italiano
+   - Porte logiche elementari (XOR/AND/OR/NOT) con operatori diretti (^, &, |, !),
+     MAI "Module(new XOR)"/"Module(new AND)"/"Module(new OR)": non esistono
 6. Se gli errori derivano da un'esecuzione di test falliti su Verilator
    (compilazione o simulazione), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
@@ -193,6 +200,9 @@ REGOLE OBBLIGATORIE:
    "litValue()" causa l'errore di compilazione "BigInt does not take
    parameters" — un pattern che genera sempre questo errore, quindi va evitato
    del tutto, non solo corretto togliendo le parentesi.
+4. NON usare "chisel3.iotesters.PeekPokeTester" (API deprecata, rimossa da
+   anni, incompatibile con questo progetto): SOLO ChiselTest/ScalaTest come
+   nella struttura obbligatoria sopra (AnyFlatSpec + ChiselScalatestTester).
 
 CASI DA TESTARE:
   • Caso base (valori tipici)
@@ -423,6 +433,29 @@ CHISEL_KNOWLEDGE_BASE = [
                  "chiamare con parentesi un valore senza parametri). Non basta togliere le "
                  "parentesi: sostituisci ogni 'assert(dut.io.X.peek().litValue() === V)' con "
                  "'dut.io.X.expect(V.U)', il metodo idiomatico di ChiselTest per le asserzioni."),
+    },
+    {
+        "triggers": ["not found: type xor", "not found: type and", "not found: type or",
+                     "not found: type not", "module(new xor", "module(new and", "module(new or"],
+        "hint": ("Le classi 'XOR'/'AND'/'OR'/'NOT' non esistono: NON istanziare porte logiche "
+                 "elementari con 'Module(new XOR)' ecc. Sostituisci ogni istanza con gli "
+                 "operatori Chisel diretti sugli operandi: 'a ^ b' per XOR, 'a & b' per AND, "
+                 "'a | b' per OR, '!a' per NOT."),
+    },
+    {
+        "triggers": ["not found: value e2m1", "not found: type e2m1", "e2m1()"],
+        "hint": ("'E2M1' non è un tipo Chisel a sé: è solo il nome della codifica che il "
+                 "Bundle MXFP4 già implementa. Sostituisci ogni 'Output(E2M1())' o "
+                 "'Input(E2M1())' con 'Output(new MXFP4)' / 'Input(new MXFP4)'."),
+    },
+    {
+        "triggers": ["iotesters", "peekpoketester", "object iotesters is not a member"],
+        "hint": ("'chisel3.iotesters.PeekPokeTester' è un'API deprecata e non disponibile in "
+                 "questo progetto (non è nelle dipendenze di build.sbt). Riscrivi il testbench "
+                 "con ChiselTest/ScalaTest: 'class NomeTest extends AnyFlatSpec with "
+                 "ChiselScalatestTester' e 'test(new NomeModulo).withAnnotations(Seq("
+                 "VerilatorBackendAnnotation)) { dut => ... }', con 'dut.io.X.poke(...)' e "
+                 "'dut.io.X.expect(...)'."),
     },
 ]
 
@@ -825,6 +858,16 @@ def _normalize_plan(plan: dict, spec: str) -> dict:
             return str(label)
         plan["passi_algoritmo"] = [_step_to_str(s) for s in steps]
 
+# Il Planner a volte tratta "E2M1" come un tipo distinto da "MXFP4" per gli
+# output (es. {"name": "Sum", "type": "E2M1"}) — ma E2M1 è solo il nome della
+# codifica che il Bundle MXFP4 implementa, non un tipo Chisel a sé. Lasciato
+# così, il Coder genera "Output(E2M1())", che non esiste da nessuna parte
+# (osservato più volte: sempre "not found: value E2M1" in compilazione).
+    for key in ("ingressi", "uscite", "segnali_interni"):
+        for port in plan.get(key, []) or []:
+            if isinstance(port, dict) and str(port.get("type", "")).strip().lower() == "e2m1":
+                port["type"] = "MXFP4"
+
     return plan
 
 # Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato.
@@ -1194,7 +1237,13 @@ def run_verilator_loop(
                     "semplici invece che MXFP4) — questo va corretto nel nuovo tentativo.\n\n"
                 ) + retry_note
             code = run_coder(plan, spec, coder, retry_note=retry_note, temperature=0.7)
-            testbench = run_tester(code, plan, tester, temperature=0.7)
+# Il Tester NON usa temperatura alta come il Coder: il testbench ha requisiti
+# strutturali rigidi (ChiselTest + VerilatorBackendAnnotation, niente API
+# alternative). Una run reale con temperature=0.7 ha fatto derivare il Tester
+# verso 'chisel3.iotesters.PeekPokeTester', un'API deprecata e incompatibile
+# con l'intero toolchain — qui vogliamo diversità nel modulo, non nel modo in
+# cui il testbench è strutturato.
+            testbench = run_tester(code, plan, tester, temperature=0.2)
             log_entry["escaped"] = True
             log_entry["esito"]   = "ESCAPED_RESTART"
             iteration_log.append(log_entry)
