@@ -226,12 +226,49 @@ REGOLE:
    - := per assegnazioni
    - Commenti in italiano
    - Porte logiche elementari (XOR/AND/OR/NOT) con operatori diretti (^, &, |, !)
-     SOLO su segnali UInt/Bool, MAI "Module(new XOR)" ecc (non esistono). Un
-     segnale MXFP4 è un Bundle senza operatori ^/&/|: per sommare due valori
-     MXFP4 usa l'algoritmo decodifica-in-fixed-point/somma/arrotonda-satura
-     del Coder (scala ×2: 0/0.5/1/1.5/2/3/4/6 → 0/1/2/3/4/6/8/12), mai XOR/
-     AND/OR sui bit grezzi codificati
-6. Se gli errori derivano da un'esecuzione di test falliti su Verilator
+     SOLO su segnali UInt/Bool, MAI "Module(new XOR)" ecc (non esistono).
+6. Un segnale MXFP4 è un Bundle: NON ha operatori ^/&/| (errore "value ^ is
+   not a member of mxfp4.MXFP4"). Se il codice da correggere somma valori
+   MXFP4 con XOR/AND/OR sui bit grezzi, è quello l'errore di fondo da
+   correggere anche se non è nella lista di issues: sostituisci con questo
+   algoritmo già validato (compila con sbt, 0 discrepanze contro un modello
+   di riferimento round-to-nearest su tutte le 256 combinazioni possibili):
+
+   def magX2(exp: UInt, mant: UInt): UInt =
+     Mux(exp === 0.U, mant, (2.U +& mant) << (exp - 1.U))
+
+   val a_mag = magX2(io.a.exp, io.a.mant)
+   val b_mag = magX2(io.b.exp, io.b.mant)
+   val a_signed = Mux(io.a.sign, 0.S -& a_mag.zext, a_mag.zext)
+   val b_signed = Mux(io.b.sign, 0.S -& b_mag.zext, b_mag.zext)
+   val sum_signed = a_signed +& b_signed
+   val out_sign = sum_signed < 0.S
+   val sum_abs  = sum_signed.abs.asUInt
+
+   val out_exp  = Wire(UInt(2.W))
+   val out_mant = Wire(UInt(1.W))
+   when (sum_abs >= 11.U) {
+     out_exp := 3.U; out_mant := 1.U   // 6.0
+   }.elsewhen (sum_abs >= 8.U) {
+     out_exp := 3.U; out_mant := 0.U   // 4.0
+   }.elsewhen (sum_abs >= 6.U) {
+     out_exp := 2.U; out_mant := 1.U   // 3.0
+   }.elsewhen (sum_abs >= 4.U) {
+     out_exp := 2.U; out_mant := 0.U   // 2.0
+   }.elsewhen (sum_abs >= 3.U) {
+     out_exp := 1.U; out_mant := 1.U   // 1.5
+   }.elsewhen (sum_abs >= 2.U) {
+     out_exp := 1.U; out_mant := 0.U   // 1.0
+   }.elsewhen (sum_abs >= 1.U) {
+     out_exp := 0.U; out_mant := 1.U   // 0.5
+   }.otherwise {
+     out_exp := 0.U; out_mant := 0.U   // 0
+   }
+   // <uscita>.sign := out_sign; <uscita>.exp := out_exp; <uscita>.mant := out_mant
+
+   Adatta i nomi dei segnali (io.a/io.b) al modulo da correggere. Se ci sono
+   più di due operandi MXFP4 (es. Cin), applica l'algoritmo in sequenza.
+7. Se gli errori derivano da un'esecuzione di test falliti su Verilator
    (compilazione o simulazione), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
    modificare l'interfaccia io se non strettamente necessario.
@@ -490,6 +527,22 @@ def error_signature(text: str) -> str:
     basis = re.sub(r"\s+", " ", basis).strip()
     return basis[:300]
 
+# Promemoria delle regole più spesso violate, da anteporre alla nota di
+# retry quando scatta l'escape: a temperatura alta (0.7, per ottenere un
+# candidato davvero diverso — vedi run_coder) il modello segue le regole
+# statiche del system prompt meno affidabilmente ed è stato osservato
+# regredire a pattern già vietati (es. chisel3.Driver). Le regole del system
+# prompt restano l'unica fonte di verità: questo è solo un richiamo mirato ai
+# punti che si sono visti saltare più spesso, non una loro sostituzione.
+CRITICAL_REMINDERS = (
+    "Promemoria (regole spesso dimenticate a questa temperatura più alta):\n"
+    "- NON usare chisel3.Driver né 'object X extends App': non servono e non esistono più.\n"
+    "- Usa SEMPRE 'import mxfp4._' e dichiara ingressi/uscite MXFP4 con 'new MXFP4', mai UInt semplice.\n"
+    "- NON istanziare 'Module(new XOR/AND/OR)': non esistono.\n"
+    "- Un segnale MXFP4 è un Bundle: NON ha operatori ^/&/|. Per sommare valori MXFP4 usa "
+    "l'algoritmo decodifica/allinea/somma/arrotonda-satura descritto nelle regole, non XOR/AND/OR.\n\n"
+)
+
 # Base di conoscenza di errori Chisel/Scala osservati per davvero durante lo
 # sviluppo di questa pipeline, con il suggerimento che li risolve — idea di
 # RTLFixer (RAG su un knowledge base di errori di sintassi comuni) adattata in
@@ -576,6 +629,12 @@ CHISEL_KNOWLEDGE_BASE = [
                  "argomenti. Per un template di tipo (porte/segnali) usa 'new MXFP4' o 'MXFP4()' "
                  "senza argomenti; per un valore letterale costante usa 'MXFP4(bits)' — la "
                  "funzione apply(bits: Int) del companion object, non il costruttore della classe."),
+    },
+    {
+        "triggers": ["cannot be applied to ()", "asuint()", "assint()", "asbool()"],
+        "hint": ("In Chisel ').asUInt'/'.asSInt'/'.asBool' sono valori, non metodi: chiamarli con "
+                 "le parentesi (es. '.asSInt()') causa 'cannot be applied to ()' — stesso problema "
+                 "di '.litValue()'. Togli le parentesi: '.asUInt', '.asSInt', '.asBool' senza ()."),
     },
 ]
 
@@ -1202,7 +1261,7 @@ def run_review_fix_loop(
                                   f"rigenero il modulo da zero (iterazione {i})")
             reviewer.reset_history()
             fixer.reset_history()
-            retry_note = tail(current_error_text, 800)
+            retry_note = CRITICAL_REMINDERS + tail(current_error_text, 800)
             if not mxfp4_ok:
                 retry_note = (
                     "Il tentativo precedente NON usava affatto il Bundle MXFP4 "
@@ -1380,7 +1439,7 @@ def run_verilator_loop(
             agent_step("ESCAPE", f"Stesso errore per {stuck_count + 1} iterazioni: "
                                   f"rigenero modulo e testbench da zero (iterazione {i})")
             fixer.reset_history()
-            retry_note = tail(test_out, 800)
+            retry_note = CRITICAL_REMINDERS + tail(test_out, 800)
             if not mxfp4_ok:
                 retry_note = (
                     "Il tentativo precedente NON usava affatto il Bundle MXFP4 "
