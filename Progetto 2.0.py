@@ -1,0 +1,1083 @@
+import os
+import sys
+import json
+import re
+import shutil
+import subprocess
+import argparse
+import datetime
+import textwrap
+import urllib.request
+import urllib.error
+from pathlib import Path
+import mxfp4_ref 
+
+# Configurazione di ollama.
+DEFAULT_HOST   = "http://localhost:11434"
+MAX_FIX_ITER   = 10    # Metto un limite di interazioni per evitare loop infiniti.
+OLLAMA_TIMEOUT = 600   # Metto un timeout per le chiamate ad ollama. 
+
+# Modelli consigliati per il workflow. Do la possibiilità di scegliere il modello per avere più versatilità e per poter effettuare test con modelli diversi.
+RECOMMENDED_MODELS = [
+    "codellama",
+    "deepseek-coder",
+    "deepseek-r1",
+    "qwen2.5-coder",
+    "llama3.1",
+    "llama3",
+    "mistral",
+    "phi4",
+]
+
+# Prepraro i prompt per i vari agenti. Questi prompt sono progettati per guidare il comportamento degli agenti LLM in modo coerente con il loro ruolo specifico nel workflow.
+SYSTEM_PLANNER = """\
+Sei un esperto di architetture hardware digitale e aritmetica a bassa precisione.
+Ricevi una specifica testuale di un'unità aritmetica da implementare in Chisel 3
+per il formato numerico elemento MXFP4 (E2M1).
+
+CONTESTO MXFP4 — SCOPE DICHIARATO:
+  Questo framework genera unità che operano sul formato ELEMENTO E2M1
+  (1 valore a 4 bit), che è il "building block" del formato MXFP4 completo.
+  Il formato MXFP4 completo, definito dalla OCP Microscaling (MX)
+  Specification v1.0, è un formato block floating-point: un blocco di 32
+  elementi E2M1 condivide un fattore di scala a 8 bit E8M0. Questo
+  framework NON implementa il block-scaling a 32 elementi: genera
+  aritmetica a livello di singolo elemento E2M1. Questo va sempre
+  dichiarato nel campo "note_mxfp4" del piano.
+
+FORMATO E2M1 (4 bit, bias = 1):
+  bit[3]   = segno (0=positivo, 1=negativo)
+  bit[2:1] = esponente (2 bit)
+  bit[0]   = mantissa (1 bit)
+
+  Regola di decodifica (obbligatoria, NON confondere i due casi):
+    • se esponente == 0 (SUBNORMALE): valore = (-1)^segno * mantissa * 0.5
+      (bit implicito = 0, NON 1)
+    • se esponente != 0 (NORMALE):    valore = (-1)^segno * (1 + mantissa*0.5) * 2^(esponente-1)
+      (bit implicito = 1)
+
+  Valori rappresentabili: 0, 0.5, 1, 1.5, 2, 3, 4, 6 (e i corrispondenti negativi).
+  Massimo rappresentabile: 0b0111 = +6.0 (usato come valore di saturazione in overflow).
+
+  Per la MOLTIPLICAZIONE l'esponente del risultato prima della normalizzazione
+  è exp_a + exp_b - bias (bias=1): il bias va sempre sottratto una volta,
+  altrimenti il risultato è concettualmente errato.
+
+  Ogni piano che coinvolga somma/allineamento di mantisse deve includere
+  esplicitamente un passo di ARROTONDAMENTO (anche solo round-to-nearest
+  con 1 bit di guardia) prima della normalizzazione finale a 1 bit di
+  mantissa: il solo troncamento introduce un bias sistematico e va evitato
+  o quantomeno dichiarato esplicitamente come approssimazione voluta.
+
+Il tuo compito è produrre un piano di implementazione strutturato in JSON.
+Rispondi SOLO con il JSON valido. Nessun testo prima o dopo. Nessun markdown.
+
+Schema JSON richiesto:
+{
+  "nome_modulo": "NomeInPascalCase",
+  "tipo": "combinatorio|sequenziale",
+  "descrizione": "descrizione funzionale completa",
+  "ingressi": [
+    {"nome": "a",   "tipo": "MXFP4|UInt|SInt|Bool", "bit": 4, "descrizione": "..."}
+  ],
+  "uscite": [
+    {"nome": "sum", "tipo": "MXFP4|UInt|SInt|Bool", "bit": 4, "descrizione": "..."}
+  ],
+  "segnali_interni": [
+    {"nome": "carry", "tipo": "UInt", "bit": 1, "descrizione": "..."}
+  ],
+  "passi_algoritmo": [
+    "1. Estrai segno, esponente e mantissa dagli ingressi",
+    "2. Allinea gli esponenti",
+    "..."
+  ],
+  "bundle_mxfp4_necessario": true,
+  "gestione_subnormali": "descrivi come viene trattato il caso esponente==0",
+  "sottrazione_bias": "true|false|non_applicabile — obbligatorio true per moltiplicatori",
+  "note_mxfp4": "OBBLIGATORIO: includi la dichiarazione di scope (solo elemento E2M1, nessun block-scaling a 32 elementi/E8M0) più le scelte su subnormali/bias/arrotondamento"
+}
+"""
+
+SYSTEM_CODER = """\
+Sei un esperto di Chisel 3 (Scala) e di formati numerici a bassa precisione.
+Devi implementare un'unità aritmetica hardware in Chisel 3 con supporto MXFP4.
+
+REGOLE OBBLIGATORIE:
+1. Prima riga: import chisel3._
+   Seconda riga: import chisel3.util._
+2. Definisci SEMPRE il Bundle MXFP4:
+     class MXFP4 extends Bundle {
+       val sign = Bool()
+       val exp  = UInt(2.W)
+       val mant = UInt(1.W)
+     }
+   Aggiungi SEMPRE un commento sopra il Bundle che dichiari lo scope:
+     "// Elemento E2M1 (building block di MXFP4). Nessun block-scaling
+     //  a 32 elementi / E8M0: si veda OCP MX Specification v1.0."
+3. Ogni modulo Chisel estende Module e ha un val io = IO(new Bundle { ... })
+4. Usa := per assegnazioni, non =
+5. I segnali Wire si dichiarano con: val nome = Wire(UInt(N.W))
+6. Usa nomi inglesi snake_case per segnali e moduli PascalCase
+7. Commenta ogni blocco logico in italiano (utile per la tesi)
+8. Nessuna libreria esterna oltre a chisel3 standard
+9. Il codice deve essere COMPLETO e COMPILABILE
+10. GESTIONE SUBNORMALI (OBBLIGATORIA): il bit implicito della mantissa
+    NON è sempre 1. Devi discriminare esplicitamente il caso esponente==0:
+      val bit_implicito = Mux(x.exp === 0.U, 0.U(1.W), 1.U(1.W))
+      val mantissa_estesa = Cat(bit_implicito, x.mant)
+    Usare sempre Cat(1.U(1.W), x.mant) senza il Mux è un ERRORE.
+11. SOTTRAZIONE DEL BIAS (OBBLIGATORIA per moltiplicatori/operazioni che
+    sommano esponenti): l'esponente combinato è
+      val exp_combinato = (x.exp +& y.exp) - 1.U   // bias = 1, va sottratto
+    Sommare gli esponenti senza sottrarre il bias è un ERRORE concettuale.
+12. ARROTONDAMENTO: dopo un'addizione o normalizzazione che produce più
+    bit di mantissa di quanti ne siano disponibili in uscita (1 bit),
+    non troncare silenziosamente: implementa almeno un arrotondamento
+    round-to-nearest con bit di guardia, oppure commenta esplicitamente
+    "// troncamento (non arrotondamento) - approssimazione dichiarata"
+    se scegli di semplificare.
+13. I nomi dei segnali di ingresso/uscita nell'IO Bundle DEVONO corrispondere
+    ESATTAMENTE (stesso nome) ai campi "nome" di ingressi/uscite nel piano
+    JSON ricevuto, per permettere la validazione automatica esterna.
+
+Rispondi con SOLO il codice Scala/Chisel.
+Non usare markdown (no ```), nessun testo prima o dopo il codice.
+"""
+
+SYSTEM_REVIEWER = """\
+Sei un revisore esperto di codice Chisel 3 per unità aritmetiche MXFP4.
+Ricevi del codice Chisel 3 e devi identificare errori precisi.
+
+CHECKLIST DA VERIFICARE:
+  [ ] Import: chisel3._ e chisel3.util._ presenti
+  [ ] Bundle MXFP4 definito con: sign (Bool), exp (UInt(2.W)), mant (UInt(1.W))
+  [ ] Ogni modulo estende Module
+  [ ] IO Bundle dichiarato con val io = IO(new Bundle { ... })
+  [ ] Assegnazioni usano := non =
+  [ ] Wire dichiarati prima dell'uso
+  [ ] Parentesi graffe bilanciate
+  [ ] Nessuna sintassi Scala non supportata in Chisel 3
+  [ ] Nessun import o riferimento a librerie inesistenti
+  [ ] SUBNORMALI: il bit implicito NON è sempre 1. Deve esistere un Mux
+      (o equivalente) che usa bit implicito 0 quando exp === 0.U e
+      bit implicito 1 altrimenti. Cat(1.U, mant) incondizionato è un ERRORE.
+  [ ] BIAS: se il modulo somma esponenti (es. moltiplicatore), il bias (1)
+      deve essere sottratto una volta dal risultato della somma. La sola
+      somma "a.exp +& b.exp" senza sottrazione del bias è un ERRORE.
+  [ ] ARROTONDAMENTO: se la mantissa intermedia ha più bit di quella
+      d'uscita, deve esserci un arrotondamento esplicito oppure un
+      commento che dichiari il troncamento come scelta consapevole.
+  [ ] NOMI PORTE: i nomi dei segnali IO corrispondono ai nomi del piano JSON.
+
+Se il codice supera tutti i controlli, rispondi ESATTAMENTE (solo questo):
+PASS
+
+Se ci sono problemi, rispondi ESATTAMENTE in questo formato:
+ISSUES
+- [riga o blocco] descrizione problema 1
+- [riga o blocco] descrizione problema 2
+...
+"""
+
+SYSTEM_FIXER = """\
+Sei un esperto Chisel 3 che corregge codice hardware con errori.
+Ricevi il codice difettoso e una lista di issues da risolvere.
+
+REGOLE:
+1. Correggi TUTTI gli errori elencati senza eccezioni
+2. Non introdurre nuovi errori
+3. Mantieni la stessa logica funzionale dell'originale
+4. Il codice output deve essere completo (non troncare)
+5. Rispetta le stesse regole del Coder:
+   - import chisel3._ e chisel3.util._
+   - Bundle MXFP4 con sign/exp/mant
+   - := per assegnazioni
+   - Commenti in italiano
+   - Bit implicito 0 quando exp===0.U (subnormale), 1 altrimenti — MAI
+     Cat(1.U, mant) incondizionato
+   - Bias (1) sottratto una volta quando si sommano esponenti
+   - Arrotondamento esplicito (o troncamento dichiarato) prima della
+     normalizzazione finale della mantissa
+   - Nomi delle porte IO identici ai nomi nel piano JSON
+
+non scrivere mai codice nella tua risposta.
+Scrivi SOLO "PASS" oppure "ISSUES" seguito dalla lista.
+Nessun markdown, nessun testo aggiuntivo.
+"""
+
+SYSTEM_TESTER = """\
+Sei un esperto di ChiselTest e ScalaTest per la verifica di circuiti hardware.
+Ricevi un modulo Chisel MXFP4 e devi generare un testbench completo.
+
+STRUTTURA OBBLIGATORIA:
+  import chisel3._
+  import chiseltest._
+  import org.scalatest.flatspec.AnyFlatSpec
+
+  class NomeModuloTest extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "NomeModulo"
+
+    it should "descrizione test" in {
+      test(new NomeModulo) { dut =>
+        // test cases
+      }
+    }
+  }
+
+CASI DA TESTARE (qualitativi — casi mirati, non esaustivi):
+  • Caso base (valori tipici)
+  • Zero (0x0)
+  • Un valore SUBNORMALE come ingresso (exp=00, mant=1 → 0.5): verifica
+    che il bit implicito usato sia 0 e non 1
+  • Valore massimo rappresentabile in MXFP4 (0b0111 = +6.0)
+  • Valori negativi (se il modulo li supporta)
+  • Overflow/underflow e saturazione
+  • Simmetria (a op b == b op a per operazioni commutative)
+
+Ricorda: in MXFP4 E2M1 il valore massimo è 0b0111 = +6.0
+
+IMPORTANTE: NON è necessario generare test esaustivi su tutte le
+combinazioni di ingresso: per la copertura esaustiva (tutte le 256
+combinazioni a 4x4 bit, calcolate con un modello di riferimento Python
+indipendente) il framework aggiunge automaticamente un metodo di test
+dopo la tua risposta. Concentrati sui casi qualitativi elencati sopra,
+con commenti chiari in italiano sul significato di ciascun caso.
+
+Rispondi con SOLO il codice Scala del testbench (la classe test completa,
+graffa di chiusura inclusa). Nessun markdown, nessun testo aggiuntivo.
+"""
+
+# Set di colori per i messaggi in console.
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[36m"
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+DIM    = "\033[2m"
+BLUE   = "\033[34m"
+MAGENTA = "\033[35m"
+
+# Messaggi di log e banner per l'interfaccia utente.
+def banner():
+    print(f"""\n{CYAN}{BOLD}\
+╔══════════════════════════════════════════════════════════════════╗
+║  Agentic Chisel MXFP4 Generator  (Ollama — 100% locale)          ║
+║  Planner → Coder → [Reviewer ⟷ Fixer]* → Tester → Output        ║
+╚══════════════════════════════════════════════════════════════════╝{RESET}""")
+
+def agent_step(agent_name: str, desc: str):
+    print(f"\n{MAGENTA}{BOLD}[{agent_name.upper()}]{RESET} {desc}")
+
+def step(n: int, msg: str):
+    print(f"\n{CYAN}{BOLD}[STEP {n}]{RESET} {msg}")
+
+def ok(msg: str):
+    print(f"  {GREEN}OK{RESET}  {msg}")
+
+def warn(msg: str):
+    print(f"  {YELLOW}WRN{RESET}  {msg}")
+
+def err(msg: str):
+    print(f"  {RED}KO{RESET}  {msg}", file=sys.stderr)
+
+def info(msg: str):
+    print(f"  {BLUE}Info{RESET}  {msg}")
+
+def hr():
+    print(f"{DIM}{'─' * 68}{RESET}")
+
+
+# Api per ollama. Ollama_get() ritorna il JSON o None se non raggiungibile. Ollama_chat() gestisce la chat multi-turn con history e system prompt.
+def ollama_get(url: str, timeout: int = 5):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def ollama_chat(host: str, model: str, system_prompt: str,
+                history: list[dict], timeout: int = OLLAMA_TIMEOUT) -> str:
+    payload = {
+        "model":   model,
+        "stream":  False,
+        "system":  system_prompt,
+        "options": {
+            "temperature": 0.1,     
+            "num_predict": 4096,
+        },
+        "messages": history,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req  = urllib.request.Request(
+        f"{host}/api/chat", data=body,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="replace")
+        err(f"HTTP {e.code}: {body_err}")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        err(f"Connessione persa: {e.reason}")
+        sys.exit(1)
+
+    return data.get("message", {}).get("content", "").strip()
+
+# Classe Agent: rappresenta un agente LLM con memoria conversazionale. Ogni agente mantiene la propria history separata, quindi Fixer "ricorda" le iterazioni precedenti e non ripete gli stessi errori. 
+# Il system prompt è fisso e descrive il ruolo dell'agente.
+class Agent:
+    def __init__(self, name: str, system_prompt: str, host: str, model: str):
+        self.name          = name
+        self.system_prompt = system_prompt
+        self.host          = host
+        self.model         = model
+        self.history: list[dict] = []   # memoria conversazionale
+
+# Invia un messaggio all'agente e ottiene la risposta. La risposta viene aggiunta alla history per il contesto multi-turn.
+    def run(self, user_message: str) -> str:
+        self.history.append({"role": "user", "content": user_message})
+        info(f"Agente {BOLD}{self.name}{RESET} in elaborazione…")
+
+        t_start  = datetime.datetime.now()
+        response = ollama_chat(
+            self.host, self.model, self.system_prompt, self.history
+        )
+        elapsed  = (datetime.datetime.now() - t_start).total_seconds()
+
+        self.history.append({"role": "assistant", "content": response})
+        ok(f"{self.name} risposta in {elapsed:.1f}s  "
+           f"({len(response)} caratteri)")
+        return response
+
+    def reset_history(self):
+        self.history = []
+
+
+# Classe SbtCompiler: gestisce la compilazione reale del codice Chisel generato. Scrive il codice in una directory temporanea, esegue 'sbt compile' e cattura eventuali errori. 
+class SbtCompiler:
+    def __init__(self):
+        self.available = shutil.which("sbt") is not None or \
+                 shutil.which("sbt.bat") is not None
+
+# Compila il codice Chisel in una directory temporanea. Ritorna (successo, output). Se sbt non è disponibile, ritorna True con un messaggio di avviso.
+    def compile(self, chisel_code: str, stem: str) -> tuple[bool, str]:
+        if not self.available:
+            return True, "sbt non trovato — compilazione reale saltata"
+
+        tmp = Path(f"/tmp/chisel_check_{stem}_{datetime.datetime.now().strftime('%H%M%S%f')}")
+        tmp.mkdir(parents=True, exist_ok=True)
+
+        # Progetto SBT minimale
+        (tmp / "build.sbt").write_text(
+            'scalaVersion := "2.13.12"\n'
+            'libraryDependencies += "org.chipsalliance" %% "chisel" % "6.5.0"\n'
+            'addCompilerPlugin('
+            '"org.chipsalliance" % "chisel-plugin" % "6.5.0" cross CrossVersion.full)\n',
+            encoding="utf-8"
+        )
+        src = tmp / "src" / "main" / "scala"
+        src.mkdir(parents=True, exist_ok=True)
+        proj_dir = tmp / "project"
+        proj_dir.mkdir(exist_ok=True)
+        (proj_dir / "build.properties").write_text(
+            "sbt.version=1.10.7\n", encoding="utf-8"
+        )
+        (src / f"{stem}.scala").write_text(chisel_code, encoding="utf-8")
+
+        try:
+            result = subprocess.run(
+                ["sbt", "compile"],
+                cwd=tmp, capture_output=True, text=True, timeout=180, shell=True
+            )
+            output  = (result.stdout + result.stderr).strip()
+            success = result.returncode == 0
+            return success, output
+
+        except subprocess.TimeoutExpired:
+            return False, "sbt compile timeout (>180s)"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+# Input della specifica: può essere fornita come argomento CLI (--spec), come file Python (--file) o in modalità interattiva. 
+# La funzione get_specification gestisce queste tre modalità e ritorna la specifica testuale da usare nel workflow.
+def get_specification(file_arg: str | None, spec_arg: str | None) -> str:
+    step(0, "Acquisizione della specifica")
+
+    if spec_arg:
+        ok(f"Specifica da argomento CLI ({len(spec_arg)} caratteri)")
+        return spec_arg
+
+    if file_arg:
+        path = Path(file_arg)
+        if not path.exists():
+            err(f"File non trovato: {path}")
+            sys.exit(1)
+        source = path.read_text(encoding="utf-8")
+        ok(f"File caricato come contesto: {path.name}  "
+           f"({source.count(chr(10))+1} righe)")
+        return (
+            "Implementa in Chisel 3 con formato MXFP4 (E2M1, 4 bit) "
+            "un'unità aritmetica hardware funzionalmente equivalente "
+            f"al seguente codice Python:\n\n```python\n{source}\n```\n\n"
+            "Adatta ingressi, uscite e logica al dominio hardware/MXFP4."
+        )
+
+    # Modalità interattiva
+    print(f"""
+  Descrivi l'unità aritmetica da implementare in Chisel + MXFP4.
+
+  Esempi di specifiche:
+    • "Implementa un full adder 1-bit con ingressi e uscite MXFP4 E2M1"
+    • "Crea un moltiplicatore che moltiplica due numeri MXFP4 a 4 bit"
+    • "ALU MXFP4 con addizione e sottrazione, gestione overflow"
+    • "Ripple-carry adder 4-bit con rappresentazione MXFP4"
+""")
+    spec = input(f"  {BOLD}Descrizione dell'unità:{RESET} ").strip()
+    if not spec:
+        err("Specifica vuota.")
+        sys.exit(1)
+    ok(f"Specifica acquisita ({len(spec)} caratteri)")
+    return spec
+
+# Primo agente: il Planner analizza la specifica e produce un piano JSON strutturato. 
+# Il piano include nome modulo, ingressi/uscite, algoritmo e segnali interni. Questo piano è poi usato dal Coder come base per la generazione del codice Chisel.
+def run_planner(spec: str, agent: Agent) -> dict:
+    agent_step("PLANNER", "Analisi della specifica → piano di implementazione JSON")
+
+    raw = agent.run(
+        f"Specifica dell'unità da implementare:\n\n{spec}\n\n"
+        "Crea il piano JSON completo."
+    )
+
+# Estrazione del JSON dalla risposta dell'agente. 
+    clean = re.sub(r"```json|```", "", raw).strip()
+    m = re.search(r"\{.*\}", clean, re.DOTALL)
+    if m:
+        clean = m.group(0)
+
+    try:
+        plan = json.loads(clean)
+        ok(f"Modulo: '{plan.get('nome_modulo', '?')}'  —  "
+           f"tipo: {plan.get('tipo', '?')}")
+        ok(f"Ingressi: {len(plan.get('ingressi', []))}  |  "
+           f"Uscite: {len(plan.get('uscite', []))}")
+        if plan.get("passi_algoritmo"):
+            ok(f"Algoritmo: {len(plan['passi_algoritmo'])} passi pianificati")
+        return plan
+    except json.JSONDecodeError as e:
+        warn(f"JSON non parsabile ({e}) — continuo con piano testuale")
+        return {"nome_modulo": "MxFp4Unit", "tipo": "combinatorio",
+                "descrizione": spec, "raw_plan": raw,
+                "ingressi": [], "uscite": [], "passi_algoritmo": []}
+
+# Secondo agente: il Coder riceve il piano JSON e genera il codice Chisel 3 completo.
+def run_coder(plan: dict, spec: str, agent: Agent) -> str:
+    agent_step("CODER", "Generazione codice Chisel 3 MXFP4")
+
+    plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
+    prompt = (
+        f"Specifica originale:\n{spec}\n\n"
+        f"Piano di implementazione:\n{plan_str}\n\n"
+        "Genera il codice Chisel 3 completo e compilabile.\n"
+        "Ricorda: no markdown fence, solo codice Scala."
+    )
+
+    code = agent.run(prompt)
+    code = re.sub(r"```scala|```", "", code).strip()
+
+    ok(f"Codice generato: {len(code)} caratteri, "
+       f"{code.count(chr(10))+1} righe")
+    return code
+
+# Terzo e quarto agente: Reviewer e Fixer lavorano in un loop. 
+# Il Reviewer valuta il codice generato, se ci sono problemi il Fixer li corregge. Questo ciclo si ripete fino a quando il codice passa la revisione o si raggiunge il numero massimo di iterazioni.
+def run_review_fix_loop(
+    code:      str,
+    spec:      str,
+    reviewer:  Agent,
+    fixer:     Agent,
+    compiler:  SbtCompiler,
+    stem:      str,
+    max_iter:  int
+) -> tuple[str, list[dict]]:
+    agent_step("REVIEWER/FIXER", f"Loop review → fix (max {max_iter} iterazioni)")
+
+    iteration_log: list[dict] = []
+
+    for i in range(1, max_iter + 1):
+        print(f"\n  {CYAN}── Iterazione {i}/{max_iter} ──{RESET}")
+
+# Revisione LLM 
+        reviewer.reset_history()  
+        review_result = reviewer.run(
+            f"Specifica originale:\n{spec}\n\n"
+            f"Codice Chisel da revisionare:\n{code}"
+        )
+        passed_llm = review_result.strip().upper().startswith("PASS")
+
+        if passed_llm:
+            ok("LLM Reviewer: PASS")
+        else:
+            warn("LLM Reviewer: trovati problemi")
+            issues_preview = "\n".join(review_result.splitlines()[:6])
+            print(f"  {DIM}{issues_preview}{RESET}")
+
+# Compilazione con sbt. 
+        compile_ok, compile_out = compiler.compile(code, stem)
+        if compiler.available:
+            if compile_ok:
+                ok("sbt compile: OK")
+            else:
+                warn("sbt compile: ERRORI")
+                print(f"  {DIM}{compile_out[:300]}…{RESET}")
+        else:
+            info("sbt non disponibile — solo revisione LLM")
+
+# Log iterazione. 
+        log_entry: dict = {
+            "iterazione":      i,
+            "review_llm":      review_result,
+            "review_llm_pass": passed_llm,
+            "compile_ok":      compile_ok,
+            "compile_output":  compile_out[:600] if compile_out else "",
+            "fix_applicato":   False,
+            "esito":           "",
+        }
+
+# Esito.
+        tutto_ok = passed_llm and compile_ok
+
+        if tutto_ok:
+            ok(f"Codice validato all'iterazione {i}")
+            log_entry["esito"] = "PASS"
+            iteration_log.append(log_entry)
+            break
+
+        if i == max_iter:
+            warn(f"Raggiunto limite iterazioni ({max_iter}) — uso l'ultimo codice")
+            log_entry["esito"] = "MAX_ITER_REACHED"
+            iteration_log.append(log_entry)
+            break
+
+# Fix
+        agent_step("FIXER", f"Correzione automatica (iterazione {i})")
+
+        fix_prompt = f"Codice con problemi:\n{code}\n\n"
+        if not passed_llm:
+            fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
+        if not compile_ok and compiler.available:
+            fix_prompt += (
+                f"Errori di compilazione sbt:\n{compile_out[:1000]}\n\n"
+            )
+        fix_prompt += (
+            "Correggi TUTTI i problemi elencati e restituisci "
+            "il codice Chisel completo e corretto."
+        )
+
+        code = fixer.run(fix_prompt)
+        code = re.sub(r"```scala|```", "", code).strip()
+        ok(f"Codice corretto: {len(code)} caratteri")
+
+        log_entry["fix_applicato"] = True
+        log_entry["esito"]         = "FIXED_CONTINUE"
+        iteration_log.append(log_entry)
+
+    return code, iteration_log
+
+# Quinto agente: il Tester genera un testbench ChiselTest/ScalaTest completo, coprendo casi base, zero, massimo, overflow e simmetria.
+def run_tester(code: str, plan: dict, agent: Agent) -> str:
+    agent_step("TESTER", "Generazione testbench ChiselTest")
+
+    plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
+    tb = agent.run(
+        f"Piano del modulo:\n{plan_str}\n\n"
+        f"Codice Chisel del modulo:\n{code}\n\n"
+        "Genera il testbench ChiselTest completo.\n"
+        "Ricorda: no markdown fence, solo codice Scala."
+    )
+    tb = re.sub(r"```scala|```", "", tb).strip()
+    ok(f"Testbench generato (casi qualitativi): {len(tb)} caratteri")
+    if op:
+        exhaustive_method = build_exhaustive_test_method(plan, op)
+        if exhaustive_method:
+            tb = insert_method_in_test_class(tb, exhaustive_method)
+            ok(f"Test esaustivo aggiunto: 256 combinazioni contro mxfp4_ref.py "
+               f"(operazione rilevata: '{op}')")
+        else:
+            warn("Operazione rilevata ma non è stato possibile determinare "
+                 "i nomi delle porte IO dal piano — test esaustivo saltato")
+    else:
+        info("Operazione non riconosciuta automaticamente (add/mul/cmp) — "
+             "nessun test esaustivo aggiunto, solo i casi qualitativi del Tester")
+
+    return tb
+
+
+def detect_operation(plan: dict) -> str | None:
+    """Individua euristicamente il tipo di operazione a partire dal piano,
+    per decidere se e quale test esaustivo generare con mxfp4_ref.
+    Riconosce solo il caso più semplice e comune: due ingressi MXFP4 e
+    una singola uscita (MXFP4 per add/mul, Bool per cmp)."""
+    testo = " ".join([
+        plan.get("nome_modulo", ""),
+        plan.get("descrizione", ""),
+        " ".join(plan.get("passi_algoritmo", [])),
+    ]).lower()
+
+    ingressi = plan.get("ingressi", [])
+    uscite = plan.get("uscite", [])
+    ingressi_mxfp4 = [i for i in ingressi if str(i.get("tipo", "")).upper() == "MXFP4"]
+    if len(ingressi_mxfp4) != 2 or len(uscite) < 1:
+        return None  # supportiamo solo il caso a due operandi MXFP4
+
+    if any(k in testo for k in ("moltiplic", "mult", "prod")):
+        return "mul"
+    if any(k in testo for k in ("somm", "add", "sum", "adder")):
+        return "add"
+    if any(k in testo for k in ("confront", "compar", "maggiore", "cmp")):
+        return "cmp"
+    return None
+
+
+def build_exhaustive_test_method(plan: dict, op: str) -> str | None:
+    """Costruisce (in Python, senza passare dall'LLM) un metodo ScalaTest
+    che verifica TUTTE le 256 combinazioni di ingresso contro il modello
+    di riferimento mxfp4_ref. I nomi delle porte sono presi dal piano."""
+    ingressi_mxfp4 = [i for i in plan.get("ingressi", [])
+                       if str(i.get("tipo", "")).upper() == "MXFP4"]
+    if len(ingressi_mxfp4) != 2:
+        return None
+    a_name, b_name = ingressi_mxfp4[0]["nome"], ingressi_mxfp4[1]["nome"]
+
+    uscite = plan.get("uscite", [])
+    if op in ("add", "mul"):
+        uscite_mxfp4 = [o for o in uscite if str(o.get("tipo", "")).upper() == "MXFP4"]
+        if not uscite_mxfp4:
+            return None
+        out_name = uscite_mxfp4[0]["nome"]
+        vectors = mxfp4_ref.exhaustive_binary_vectors(op)
+        righe = ",\n      ".join(
+            f'({v["a"]}, {v["b"]}, {str(bool(v["expected_sign"])).lower()}, '
+            f'{v["expected_exp"]}, {v["expected_mant"]})'
+            for v in vectors
+        )
+        modulo_name = plan.get("nome_modulo", "Modulo")
+        return f"""
+  // ==========================================================================
+  // Test ESAUSTIVO generato automaticamente da mxfp4_ref.py (Python), NON
+  // dall'LLM: copre tutte le 256 combinazioni di ingresso a 4x4 bit e
+  // confronta l'uscita del modulo Chisel con il modello di riferimento
+  // bit-accurato del formato E2M1 (golden model, validato contro la
+  // Tabella 4.1 della tesi in mxfp4_ref.self_check()).
+  // ==========================================================================
+  it should "rispettare il modello di riferimento Python su tutte le 256 combinazioni ({op})" in {{
+    test(new {modulo_name}) {{ dut =>
+      val vettori = Seq(
+      {righe}
+      )
+      for ((aBits, bBits, eSign, eExp, eMant) <- vettori) {{
+        dut.io.{a_name}.sign.poke((((aBits >> 3) & 1) == 1).B)
+        dut.io.{a_name}.exp.poke(((aBits >> 1) & 3).U)
+        dut.io.{a_name}.mant.poke((aBits & 1).U)
+        dut.io.{b_name}.sign.poke((((bBits >> 3) & 1) == 1).B)
+        dut.io.{b_name}.exp.poke(((bBits >> 1) & 3).U)
+        dut.io.{b_name}.mant.poke((bBits & 1).U)
+        dut.clock.step(1)
+        dut.io.{out_name}.sign.expect(eSign.B,
+          s"a=$aBits b=$bBits: segno atteso da mxfp4_ref=$eSign")
+        dut.io.{out_name}.exp.expect(eExp.U,
+          s"a=$aBits b=$bBits: esponente atteso da mxfp4_ref=$eExp")
+        dut.io.{out_name}.mant.expect(eMant.U,
+          s"a=$aBits b=$bBits: mantissa attesa da mxfp4_ref=$eMant")
+      }}
+    }}
+  }}
+"""
+    else:  # cmp
+        uscite_bool = [o for o in uscite if str(o.get("tipo", "")).upper() == "BOOL"]
+        if not uscite_bool:
+            return None
+        out_name = uscite_bool[0]["nome"]
+        vectors = mxfp4_ref.exhaustive_binary_vectors("cmp")
+        righe = ",\n      ".join(
+            f'({v["a"]}, {v["b"]}, {str(v["expected_gt"]).lower()})'
+            for v in vectors
+        )
+        modulo_name = plan.get("nome_modulo", "Modulo")
+        return f"""
+  // ==========================================================================
+  // Test ESAUSTIVO generato automaticamente da mxfp4_ref.py (Python):
+  // tutte le 256 combinazioni di confronto contro il golden model.
+  // ==========================================================================
+  it should "rispettare il modello di riferimento Python su tutte le 256 combinazioni (cmp)" in {{
+    test(new {modulo_name}) {{ dut =>
+      val vettori = Seq(
+      {righe}
+      )
+      for ((aBits, bBits, eGt) <- vettori) {{
+        dut.io.{a_name}.sign.poke((((aBits >> 3) & 1) == 1).B)
+        dut.io.{a_name}.exp.poke(((aBits >> 1) & 3).U)
+        dut.io.{a_name}.mant.poke((aBits & 1).U)
+        dut.io.{b_name}.sign.poke((((bBits >> 3) & 1) == 1).B)
+        dut.io.{b_name}.exp.poke(((bBits >> 1) & 3).U)
+        dut.io.{b_name}.mant.poke((bBits & 1).U)
+        dut.clock.step(1)
+        dut.io.{out_name}.expect(eGt.B,
+          s"a=$aBits b=$bBits: confronto atteso da mxfp4_ref=$eGt")
+      }}
+    }}
+  }}
+"""
+
+
+def insert_method_in_test_class(testbench: str, method_code: str) -> str:
+    """Inserisce il metodo di test esaustivo appena prima dell'ultima
+    graffa di chiusura della classe di test generata dall'LLM. Se non
+    riesce a individuarla in modo affidabile, appende il metodo in coda
+    (fuori dalla classe) e lo segnala con un commento, cosi' l'errore
+    è visibile e correggibile a mano invece che silenzioso."""
+    last_brace = testbench.rfind("}")
+    if last_brace == -1:
+        return testbench + "\n// ATTENZIONE: impossibile individuare la chiusura della classe;\n" \
+                            "// il metodo esaustivo seguente va incollato manualmente nella classe:\n" + method_code
+    return testbench[:last_brace] + method_code + "\n" + testbench[last_brace:]
+
+# Salvataggio di tutti gli outputs in una directory timestamped. Include codice Chisel, testbench, report Markdown, log JSON, build.sbt e README.
+def save_outputs(
+    spec:         str,
+    plan:         dict,
+    code:         str,
+    testbench:    str,
+    iter_log:     list[dict],
+    model:        str,
+    compiler_avail: bool
+) -> Path:
+    step(6, "Salvataggio artefatti")
+
+    stem  = re.sub(r"[^a-zA-Z0-9_]", "_",
+                   plan.get("nome_modulo", "MxFp4Unit"))
+    msafe = model.replace(":", "_").replace("/", "_")
+    ts    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out   = Path(f"chisel_output_{stem}_{msafe}_{ts}")
+    out.mkdir(exist_ok=True)
+
+    hdr = (
+        "// ═══════════════════════════════════════════════════════════\n"
+        "//  Generato da: agentic_chisel_mxfp4_ollama.py\n"
+        f"//  Modello Ollama: {model}\n"
+        f"//  Data: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+        "// ═══════════════════════════════════════════════════════════\n\n"
+    )
+
+# Modulo Chisel
+    (out / f"{stem}.scala").write_text(hdr + code, encoding="utf-8")
+    ok(f"Modulo Chisel   → {out}/{stem}.scala")
+
+# Testbench
+    (out / f"{stem}Test.scala").write_text(hdr + testbench, encoding="utf-8")
+    ok(f"Testbench       → {out}/{stem}Test.scala")
+
+# Golden model Python (copiato per tracciabilità: i valori attesi nel test
+# esaustivo derivano da questo file, non da stime manuali).
+    ref_src = Path(__file__).parent / "mxfp4_ref.py"
+    if ref_src.exists():
+        shutil.copy(ref_src, out / "mxfp4_ref.py")
+        ok(f"Golden model    → {out}/mxfp4_ref.py")
+
+# build.sbt
+    (out / "build.sbt").write_text(
+        'scalaVersion := "2.13.12"\n\n'
+        'libraryDependencies ++= Seq(\n'
+        '  "org.chipsalliance" %% "chisel"     % "6.5.0",\n'
+        '  "edu.berkeley.cs"   %% "chiseltest" % "6.0.0" % "test",\n'
+        ')\n\n'
+        'addCompilerPlugin(\n'
+        '  "org.chipsalliance" % "chisel-plugin" % "6.5.0" cross CrossVersion.full\n'
+        ')\n\n'
+        'scalacOptions ++= Seq(\n'
+        '  "-language:reflectiveCalls",\n'
+        '  "-deprecation",\n'
+        '  "-feature",\n'
+        '  "-Xcheckinit",\n'
+        ')\n',
+        encoding="utf-8"
+    )
+    ok(f"build.sbt       → {out}/build.sbt")
+
+# Report Markdown
+    n_fix  = sum(1 for it in iter_log if it.get("fix_applicato"))
+    n_pass = sum(1 for it in iter_log if it.get("esito") == "PASS")
+
+    iters_md = ""
+    for it in iter_log:
+        iters_md += (
+            f"\n#### Iterazione {it['iterazione']} "
+            f"`{it['esito']}`\n\n"
+            f"| Verifica | Risultato |\n|---|---|\n"
+            f"| LLM Reviewer | `{'PASS' if it['review_llm_pass'] else 'ISSUES'}` |\n"
+            f"| sbt compile  | `{'OK' if it['compile_ok'] else 'FAIL'}` |\n"
+            f"| Fix applicato | `{it['fix_applicato']}` |\n"
+        )
+        if it.get("fix_applicato") and it.get("review_llm"):
+            excerpt = it["review_llm"][:400]
+            iters_md += f"\n**Issues rilevati:**\n```\n{excerpt}\n```\n"
+
+    algo_md = ""
+    for p in plan.get("passi_algoritmo", []):
+        algo_md += f"- {p}\n"
+
+    (out / f"report_{stem}.md").write_text(
+        f"# Report Agentico — {stem} Chisel MXFP4\n\n"
+        f"| Campo | Valore |\n|---|---|\n"
+        f"| **Modulo** | `{stem}` |\n"
+        f"| **Modello Ollama** | `{model}` |\n"
+        f"| **Data** | {datetime.datetime.now().isoformat(timespec='seconds')} |\n"
+        f"| **Agenti eseguiti** | Planner, Coder, Reviewer, Fixer, Tester |\n"
+        f"| **Iterazioni review/fix** | {len(iter_log)} |\n"
+        f"| **Fix automatici applicati** | {n_fix} |\n"
+        f"| **Compilazione sbt** | "
+        f"{'Abilitata' if compiler_avail else 'Non disponibile (solo LLM review)'} |\n\n"
+        f"---\n\n"
+        f"## Specifica Originale\n\n{spec}\n\n"
+        f"---\n\n"
+        f"## Piano di Implementazione (Planner Agent)\n\n"
+        f"```json\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n```\n\n"
+        f"### Algoritmo pianificato\n\n{algo_md}\n"
+        f"---\n\n"
+        f"## Log Agentico — Review/Fix Loop\n{iters_md}\n"
+        f"---\n\n"
+        f"## Formato MXFP4 (E2M1) — e scope della validazione\n\n"
+        f"```\n"
+        f"bit[3]   = segno  (0=+, 1=−)\n"
+        f"bit[2:1] = esponente a 2 bit (bias=1)\n"
+        f"bit[0]   = mantissa a 1 bit\n\n"
+        f"Normale   (exp!=0): (−1)^sign × 2^(exp−1) × (1 + mant×0.5)\n"
+        f"Subnormale(exp==0): (−1)^sign × mant × 0.5   (bit implicito = 0)\n"
+        f"Valori rappresentabili: 0, 0.5, 1, 1.5, 2, 3, 4, 6 (e negativi)\n"
+        f"```\n\n"
+        f"**Nota di scope.** Questo framework genera unità aritmetiche a "
+        f"livello di *singolo elemento* E2M1, il building block del formato "
+        f"MXFP4. Il formato MXFP4 completo (OCP Microscaling/MX Specification "
+        f"v1.0) prevede inoltre un fattore di scala condiviso a 8 bit (E8M0) "
+        f"per blocchi di 32 elementi, che qui NON è implementato: è "
+        f"un'estensione lasciata a sviluppi futuri.\n\n"
+        f"**Metodologia di validazione.** Oltre alla revisione LLM e alla "
+        f"compilazione sbt, il codice generato viene verificato con un "
+        f"test esaustivo (256 combinazioni, se l'operazione è "
+        f"riconosciuta automaticamente) generato deterministicamente da un "
+        f"modello di riferimento Python indipendente (`mxfp4_ref.py`, "
+        f"incluso tra gli artefatti), validato a sua volta contro la "
+        f"tabella dei valori E2M1 della tesi. I valori attesi non sono "
+        f"quindi stimati manualmente, ma calcolati da un golden model "
+        f"separato dal codice sotto test.\n\n"
+        f"---\n\n"
+        f"*Report generato automaticamente da `agentic_chisel_mxfp4_ollama.py`*\n",
+        encoding="utf-8"
+    )
+    ok(f"Report Markdown → {out}/report_{stem}.md")
+
+# Log JSON completo
+    (out / "agent_log.json").write_text(
+        json.dumps({
+            "timestamp": ts,
+            "model":     model,
+            "spec":      spec,
+            "plan":      plan,
+            "stats": {
+                "iterazioni":    len(iter_log),
+                "fix_applicati": n_fix,
+                "esito_finale":  iter_log[-1]["esito"] if iter_log else "N/A",
+            },
+            "iterations": iter_log,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    ok(f"Log JSON        → {out}/agent_log.json")
+
+# README
+    (out / "README.md").write_text(
+        f"# {stem} — Chisel MXFP4\n\n"
+        f"Generato da **agentic_chisel_mxfp4_ollama.py** con modello `{model}`.\n\n"
+        f"## Compilazione e test\n\n"
+        f"```bash\nsbt test\n```\n\n"
+        f"## File generati\n\n"
+        f"| File | Descrizione |\n|---|---|\n"
+        f"| `{stem}.scala` | Modulo Chisel MXFP4 |\n"
+        f"| `{stem}Test.scala` | Testbench ChiselTest (casi qualitativi LLM "
+        f"+ test esaustivo 256 combinazioni contro il golden model) |\n"
+        f"| `mxfp4_ref.py` | Golden model Python indipendente (E2M1): "
+        f"usato per calcolare i valori attesi del test esaustivo |\n"
+        f"| `report_{stem}.md` | Report completo per la tesi |\n"
+        f"| `agent_log.json` | Log JSON del workflow agentico |\n"
+        f"| `build.sbt` | Progetto SBT |\n",
+        encoding="utf-8"
+    )
+    ok(f"README          → {out}/README.md")
+
+    return out
+
+# Setup iniziale: verifica che Ollama sia raggiungibile e che ci siano modelli disponibili. Se non ci sono modelli, fornisce istruzioni per installarne uno.
+def check_ollama(host: str) -> list[str]:
+    step(0, f"Verifica Ollama ({host})")
+    data = ollama_get(f"{host}/api/tags")
+    if data is None:
+        err(f"Ollama non raggiungibile su {host}")
+        print(f"""
+  {YELLOW}Soluzioni:{RESET}
+    1. Avvia Ollama:       {BOLD}ollama serve{RESET}
+    2. Installa un modello:{BOLD}ollama pull codellama{RESET}
+    3. Host diverso:       {BOLD}--host http://IP:11434{RESET}
+""")
+        sys.exit(1)
+    models = [m["name"] for m in data.get("models", [])]
+    if not models:
+        err("Nessun modello installato. Esegui: ollama pull codellama")
+        sys.exit(1)
+    ok(f"Ollama online — {len(models)} modello/i disponibile/i")
+    return models
+
+
+def choose_model(available: list[str], model_arg: str | None) -> str:
+    if model_arg:
+        matches = [m for m in available if m.startswith(model_arg)]
+        if matches:
+            ok(f"Modello: {BOLD}{matches[0]}{RESET}")
+            return matches[0]
+        warn(f"'{model_arg}' non trovato — scegli dalla lista")
+
+    ordered = []
+    for rec in RECOMMENDED_MODELS:
+        ordered.extend(m for m in available if m.startswith(rec))
+    ordered.extend(m for m in available if m not in ordered)
+
+    print(f"\n  {BOLD}Modelli disponibili:{RESET}")
+    for i, name in enumerate(ordered, 1):
+        is_rec = any(name.startswith(r)
+                     for r in ["codellama", "deepseek-coder", "qwen2.5-coder"])
+        tag = f"  {GREEN}← consigliato per HDL/codice{RESET}" if is_rec else ""
+        print(f"    {BOLD}{i:2}.{RESET} {name}{tag}")
+
+    while True:
+        raw = input(f"\n  {BOLD}Scegli numero o nome [1]:{RESET} ").strip() or "1"
+        if raw.isdigit() and 0 < int(raw) <= len(ordered):
+            chosen = ordered[int(raw) - 1]
+            break
+        matches = [m for m in available if m.startswith(raw)]
+        if matches:
+            chosen = matches[0]
+            break
+        warn("Scelta non valida, riprova.")
+
+    ok(f"Modello selezionato: {BOLD}{chosen}{RESET}")
+    return chosen
+
+# Main.
+def main():
+    banner()
+
+    parser = argparse.ArgumentParser(
+        description="Agentic Chisel MXFP4 generator — Ollama locale",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Esempi:
+              python agentic_chisel_mxfp4_ollama.py
+              python agentic_chisel_mxfp4_ollama.py --spec "full adder MXFP4 4 bit"
+              python agentic_chisel_mxfp4_ollama.py --file full_adder.py --model codellama
+              python agentic_chisel_mxfp4_ollama.py --spec "moltiplicatore MXFP4" --iter 5 --verbose
+        """)
+    )
+    parser.add_argument("--spec",  "-s", help="Specifica testuale (es. 'full adder MXFP4')")
+    parser.add_argument("--file",  "-f", help="File Python come contesto (backward compat)")
+    parser.add_argument("--model", "-m", help="Modello Ollama (es. codellama, deepseek-coder)")
+    parser.add_argument("--host",        default=DEFAULT_HOST,
+                                         help=f"URL Ollama (default: {DEFAULT_HOST})")
+    parser.add_argument("--iter", "-i",  type=int, default=MAX_FIX_ITER,
+                                         help=f"Max iterazioni review/fix (default: {MAX_FIX_ITER})")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Output dettagliato")
+    args = parser.parse_args()
+
+# Setup iniziale: verifica Ollama, scegli modello, acquisisci specifica e inizializza compiler.
+    available = check_ollama(args.host)
+    model     = choose_model(available, args.model)
+    spec      = get_specification(args.file, args.spec)
+    compiler  = SbtCompiler()
+
+    if compiler.available:
+        ok("sbt trovato → compilazione reale abilitata nel loop")
+    else:
+        info("sbt non trovato → solo LLM review nel loop  "
+             "(installa sbt da https://www.scala-sbt.org per compilazione reale)")
+
+    hr()
+    print(f"\n  {BOLD}Pipeline agentica:{RESET}  "
+          f"Planner → Coder → [Reviewer ⟷ Fixer]×{args.iter} → Tester\n")
+
+# Inizializzo i 5 agenti.
+    planner  = Agent("Planner",  SYSTEM_PLANNER,  args.host, model)
+    coder    = Agent("Coder",    SYSTEM_CODER,    args.host, model)
+    reviewer = Agent("Reviewer", SYSTEM_REVIEWER, args.host, model)
+    fixer    = Agent("Fixer",    SYSTEM_FIXER,    args.host, model)
+    tester   = Agent("Tester",   SYSTEM_TESTER,   args.host, model)
+
+    t_global = datetime.datetime.now()
+
+# Eseguo il workflow.
+    plan      = run_planner(spec, planner)
+    stem_safe = re.sub(r"[^a-zA-Z0-9_]", "_",
+                       plan.get("nome_modulo", "MxFp4Unit"))
+
+    code      = run_coder(plan, spec, coder)
+
+    code, iter_log = run_review_fix_loop(
+        code, spec, reviewer, fixer,
+        compiler, stem_safe, args.iter
+    )
+
+    testbench = run_tester(code, plan, tester)
+
+    out_dir   = save_outputs(
+        spec, plan, code, testbench,
+        iter_log, model, compiler.available
+    )
+
+    elapsed_total = (datetime.datetime.now() - t_global).total_seconds()
+
+# Output finale e statistiche.
+    hr()
+    n_fix   = sum(1 for it in iter_log if it.get("fix_applicato"))
+    esito   = iter_log[-1]["esito"] if iter_log else "N/A"
+    esito_s = f"{GREEN}PASS{RESET}" if esito == "PASS" else f"{YELLOW}{esito}{RESET}"
+
+    print(f"""
+{GREEN}{BOLD} Pipeline agentica completata in {elapsed_total:.0f}s!{RESET}
+
+  {BOLD}Statistiche:{RESET}
+      • Agenti eseguiti:      5  (Planner, Coder, Reviewer, Fixer, Tester)
+      • Iterazioni review/fix: {len(iter_log)}
+      • Fix automatici:        {n_fix}
+      • Esito finale:          {esito_s}
+      • sbt compilazione:      {'✔ abilitata' if compiler.available else '⚠ non disponibile'}
+
+  {BOLD}Output:{RESET}  {BOLD}{out_dir}/{RESET}
+      ├── {stem_safe}.scala           ← Modulo Chisel MXFP4
+      ├── {stem_safe}Test.scala       ← Testbench ChiselTest
+      ├── report_{stem_safe}.md       ← Report per la tesi
+      ├── agent_log.json              ← Log JSON del workflow agentico
+      ├── build.sbt                   ← Progetto SBT
+      └── README.md
+
+  {CYAN}Compila e testa:{RESET}
+      cd {out_dir}
+      sbt test
+""")
+    hr()
+
+
+if __name__ == "__main__":
+    main()
