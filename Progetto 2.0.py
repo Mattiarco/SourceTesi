@@ -156,6 +156,16 @@ SYSTEM_REVIEWER = """\
 Sei un revisore esperto di codice Chisel 3 per unità aritmetiche MXFP4.
 Ricevi del codice Chisel 3 e devi identificare errori precisi.
 
+AMBITO (importante): rivedi SOLO il modulo hardware (Bundle/Module) che
+implementa la specifica. NON proporre, richiedere o scrivere un testbench,
+test case, logica di verifica, contatori di stato per iterare su vettori
+di test, o segnali di clock/reset gestiti manualmente: quello è compito di
+un agente diverso (il Tester), eseguito in una fase successiva e separata.
+Se il codice che ricevi non contiene un testbench, questo NON è un
+problema da segnalare: è corretto che non ce l'abbia. Il modulo sotto
+revisione deve rimanere un modulo Chisel sintetizzabile, senza logica di
+test al suo interno.
+
 CHECKLIST DA VERIFICARE:
   [ ] Import: chisel3._ e chisel3.util._ presenti
   [ ] Bundle MXFP4 definito con: sign (Bool), exp (UInt(2.W)), mant (UInt(1.W))
@@ -204,6 +214,14 @@ ISSUES
 SYSTEM_FIXER = """\
 Sei un esperto Chisel 3 che corregge codice hardware con errori.
 Ricevi il codice difettoso e una lista di issues da risolvere.
+
+AMBITO (importante): il file che correggi è SOLO il modulo hardware
+(Bundle/Module) sotto test, non un testbench. Anche se tra i problemi
+segnalati compare un suggerimento di aggiungere test, verifica, contatori
+di stato per iterare su vettori, o gestione manuale di clock/reset,
+IGNORA quel suggerimento: non è pertinente a questo file. Non aggiungere
+mai logica di test all'interno del modulo, e non rinominare la classe del
+modulo (deve restare quella del piano originale).
 
 REGOLE:
 1. Correggi TUTTI gli errori elencati senza eccezioni
@@ -747,7 +765,12 @@ def mxfp4_bundle_mancante(plan: dict, code: str) -> bool:
         return False
     has_bundle = bool(re.search(r"class\s+MXFP4\s+extends\s+Bundle", code))
     has_fields = all(re.search(rf"\b{f}\b", code) for f in ("sign", "exp", "mant"))
-    return not (has_bundle and has_fields)
+    # Non basta che il Bundle sia DEFINITO: deve essere anche USATO per
+    # almeno una porta IO (Input/Output(new MXFP4)). Si è osservato in
+    # pratica un caso in cui "class MXFP4 extends Bundle" era presente ma
+    # mai referenziato nell'IO reale, ancora basato su UInt semplici.
+    has_usage = bool(re.search(r"(Input|Output)\s*\(\s*new\s+MXFP4\b", code))
+    return not (has_bundle and has_fields and has_usage)
 
 
 def run_review_fix_loop(
