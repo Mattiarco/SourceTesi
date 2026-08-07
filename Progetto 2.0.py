@@ -10,7 +10,8 @@ import textwrap
 import urllib.request
 import urllib.error
 from pathlib import Path
-import mxfp4_ref 
+
+import mxfp4_ref  # Modello di riferimento bit-accurato per MXFP4 E2M1 (golden model)
 
 # Configurazione di ollama.
 DEFAULT_HOST   = "http://localhost:11434"
@@ -603,6 +604,12 @@ def run_tester(code: str, plan: dict, agent: Agent) -> str:
     )
     tb = re.sub(r"```scala|```", "", tb).strip()
     ok(f"Testbench generato (casi qualitativi): {len(tb)} caratteri")
+
+# Validazione esaustiva contro il golden model Python (mxfp4_ref).
+# Non dipende dall'LLM: i valori attesi sono calcolati deterministicamente,
+# quindi non possono soffrire dello stesso errore concettuale del codice
+# generato (elimina il rischio di "validazione circolare").
+    op = detect_operation(plan)
     if op:
         exhaustive_method = build_exhaustive_test_method(plan, op)
         if exhaustive_method:
@@ -1029,6 +1036,21 @@ def main():
 
 # Eseguo il workflow.
     plan      = run_planner(spec, planner)
+
+# Guardia di validità: se il Planner non ha prodotto un piano MXFP4
+# minimamente coerente (nessun ingresso/uscita), ci si ferma qui invece
+# di far proseguire Coder/Reviewer/Fixer per max_iter iterazioni su un
+# piano vuoto — capita con modelli che non rispettano bene il formato
+# JSON richiesto (es. modelli generalisti piccoli).
+    if not plan.get("ingressi") or not plan.get("uscite"):
+        err("Il Planner non ha prodotto un piano JSON valido "
+            "(ingressi/uscite vuoti). Il modello scelto probabilmente "
+            "non rispetta bene il formato JSON richiesto.")
+        info("Suggerimento: riprova con --model deepseek-coder oppure "
+             "--model qwen2.5-coder (seguono meglio le istruzioni di "
+             "formato rispetto a modelli generalisti più piccoli).")
+        sys.exit(1)
+
     stem_safe = re.sub(r"[^a-zA-Z0-9_]", "_",
                        plan.get("nome_modulo", "MxFp4Unit"))
 
