@@ -112,10 +112,19 @@ CHECKLIST DA VERIFICARE:
   [ ] Logica MXFP4 corretta (estrazione bit, allineamento esponenti, ecc.)
   [ ] Nessun import o riferimento a librerie inesistenti (oltre a chisel3 e mxfp4)
 
+REGOLA IMPORTANTE: la checklist sopra è la SOLA base per dire ISSUES. Se il
+codice compila, rispetta ogni punto della checklist ed è funzionalmente
+corretto, rispondi PASS anche se pensi che si potrebbe scrivere in modo più
+chiaro, più efficiente, con nomi migliori o più commentato: suggerimenti di
+stile, leggibilità o "best practice" NON sono un motivo valido per ISSUES.
+Un ciclo di revisione che continua a proporre piccole riscritture su codice
+già corretto non converge mai ed è un difetto, non una revisione accurata.
+
 Se il codice supera tutti i controlli, rispondi ESATTAMENTE (solo questo):
 PASS
 
-Se ci sono problemi, rispondi ESATTAMENTE in questo formato:
+Se (e solo se) manca un punto della checklist sopra, rispondi ESATTAMENTE in
+questo formato:
 ISSUES
 - [riga o blocco] descrizione problema 1
 - [riga o blocco] descrizione problema 2
@@ -178,8 +187,12 @@ REGOLE OBBLIGATORIE:
 2. NON ridefinire "class MXFP4" o "object MXFP4": è già fornito da
    "import mxfp4._" (Bundle con sign/exp/mant, più MXFP4.encode/decode
    per convertire tra Double e bit MXFP4 nelle asserzioni).
-3. Usa dut.io.<segnale>.poke(...) e dut.io.<segnale>.expect(...) coerenti
-   con i tipi dichiarati nel modulo.
+3. Per le asserzioni usa SEMPRE "dut.io.<segnale>.expect(valore.U)" (metodo
+   nativo di ChiselTest), MAI "assert(dut.io.<segnale>.peek().litValue() === ...)":
+   "litValue" è un valore, non un metodo, e chiamarlo con le parentesi
+   "litValue()" causa l'errore di compilazione "BigInt does not take
+   parameters" — un pattern che genera sempre questo errore, quindi va evitato
+   del tutto, non solo corretto togliendo le parentesi.
 
 CASI DA TESTARE:
   • Caso base (valori tipici)
@@ -403,6 +416,14 @@ CHISEL_KNOWLEDGE_BASE = [
                  "Scala assegna una val, cosa non permessa) — controlla ogni riga che "
                  "assegna un segnale di io o un Wire."),
     },
+    {
+        "triggers": ["bigint does not take parameters", "litvalue()"],
+        "hint": ("'.litValue()' con le parentesi causa SEMPRE 'BigInt does not take "
+                 "parameters' (litValue è un valore, non un metodo, in Scala non si può "
+                 "chiamare con parentesi un valore senza parametri). Non basta togliere le "
+                 "parentesi: sostituisci ogni 'assert(dut.io.X.peek().litValue() === V)' con "
+                 "'dut.io.X.expect(V.U)', il metodo idiomatico di ChiselTest per le asserzioni."),
+    },
 ]
 
 def retrieve_hints(text: str, kb: list[dict] = CHISEL_KNOWLEDGE_BASE) -> str:
@@ -415,6 +436,17 @@ def retrieve_hints(text: str, kb: list[dict] = CHISEL_KNOWLEDGE_BASE) -> str:
         return ""
     bullets = "\n".join(f"- {h}" for h in matched)
     return f"Suggerimenti noti (da errori osservati in precedenza su questo progetto):\n{bullets}\n"
+
+# Verifica deterministica (non-LLM) che il codice usi davvero il Bundle MXFP4,
+# invece di fidarsi ciecamente del giudizio del Reviewer. Run reali hanno
+# mostrato il Coder generare un full adder UInt semplice nonostante il piano
+# richiedesse esplicitamente ingressi/uscite MXFP4, SENZA che il Reviewer lo
+# segnalasse come ISSUES (il suo giudizio da solo non basta). Questo controllo
+# fa da backstop indipendente: se manca, il codice non è considerato valido a
+# prescindere da cosa dicono Reviewer/compilatore/test.
+def check_mxfp4_usage(code: str) -> bool:
+    low = code.lower()
+    return "mxfp4._" in low or "new mxfp4" in low
 
 
 # Api per ollama. Ollama_get() ritorna il JSON o None se non raggiungibile. Ollama_chat() gestisce la chat multi-turn con history e system prompt.
@@ -928,6 +960,13 @@ def run_review_fix_loop(
         else:
             info("sbt non disponibile — solo revisione LLM")
 
+# Verifica non-LLM che il codice usi davvero il Bundle MXFP4: run reali hanno
+# mostrato il Reviewer accettare codice UInt semplice senza segnalarlo, quindi
+# non ci si può fidare solo del suo giudizio per questo requisito.
+        mxfp4_ok = check_mxfp4_usage(code)
+        if not mxfp4_ok:
+            warn("Codice non usa il Bundle MXFP4 (import mxfp4._ assente)")
+
 # Log iterazione.
         log_entry: dict = {
             "iterazione":      i,
@@ -935,6 +974,7 @@ def run_review_fix_loop(
             "review_llm_pass": passed_llm,
             "compile_ok":      compile_ok,
             "compile_output":  tail(compile_out, 1200) if compile_out else "",
+            "mxfp4_ok":        mxfp4_ok,
             "fix_applicato":   False,
             "escaped":         False,
             "diagnosi":        "",
@@ -942,7 +982,7 @@ def run_review_fix_loop(
         }
 
 # Esito.
-        tutto_ok = passed_llm and compile_ok
+        tutto_ok = passed_llm and compile_ok and mxfp4_ok
 
         if tutto_ok:
             ok(f"Codice validato all'iterazione {i}")
@@ -957,8 +997,13 @@ def run_review_fix_loop(
             break
 
 # Rilevazione loop senza progressi (ReChisel): stessa firma d'errore 2 volte di fila.
+# Il marcatore MXFP4_MANCANTE è aggiunto direttamente alla firma (non al testo
+# sorgente) perché extract_failure_lines/tail potrebbero altrimenti tagliarlo
+# via prima che arrivi a error_signature.
         current_error_text = compile_out if not compile_ok else review_result
         signature = error_signature(current_error_text)
+        if not mxfp4_ok:
+            signature += "|MXFP4_MANCANTE"
         stuck_count = stuck_count + 1 if signature == last_signature else 0
         last_signature = signature
 
@@ -967,9 +1012,16 @@ def run_review_fix_loop(
                                   f"rigenero il modulo da zero (iterazione {i})")
             reviewer.reset_history()
             fixer.reset_history()
+            retry_note = tail(current_error_text, 800)
+            if not mxfp4_ok:
+                retry_note = (
+                    "Il tentativo precedente NON usava affatto il Bundle MXFP4 "
+                    "(nessun 'import mxfp4._', ingressi/uscite dichiarati come UInt "
+                    "semplici invece che MXFP4) — questo va corretto nel nuovo tentativo.\n\n"
+                ) + retry_note
             code = run_coder(
                 plan, spec, coder,
-                retry_note=tail(current_error_text, 800),
+                retry_note=retry_note,
                 temperature=0.7
             )
             log_entry["escaped"] = True
@@ -984,6 +1036,15 @@ def run_review_fix_loop(
 
         hints = retrieve_hints(current_error_text)
         fix_prompt = f"Codice con problemi:\n{code}\n\n"
+        if not mxfp4_ok:
+            fix_prompt += (
+                "PROBLEMA CRITICO: il codice NON usa affatto il formato MXFP4 "
+                "richiesto dalla specifica — manca 'import mxfp4._' e gli ingressi/"
+                "uscite sono dichiarati come UInt semplici invece che come MXFP4 "
+                "('Input(new MXFP4)'/'Output(new MXFP4)'). Riscrivi il modulo "
+                "usando il Bundle MXFP4 per gli ingressi/uscite indicati come "
+                "MXFP4 nella specifica/piano.\n\n"
+            )
         if not passed_llm:
             fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
         if not compile_ok and toolchain.sbt_available:
@@ -1087,17 +1148,22 @@ def run_verilator_loop(
             warn("sbt test (Verilator): FALLITO")
             print(f"  {DIM}…{tail(test_out, 300)}{RESET}")
 
+        mxfp4_ok = check_mxfp4_usage(code)
+        if not mxfp4_ok:
+            warn("Codice non usa il Bundle MXFP4 (import mxfp4._ assente)")
+
         log_entry: dict = {
             "iterazione":        i,
             "verilator_ok":      test_ok,
             "verilator_output":  tail(test_out, 1200) if test_out else "",
+            "mxfp4_ok":          mxfp4_ok,
             "fix_applicato":     False,
             "escaped":           False,
             "diagnosi":          "",
             "esito":             "",
         }
 
-        if test_ok:
+        if test_ok and mxfp4_ok:
             ok(f"Test verificati su Verilator all'iterazione {i}")
             log_entry["esito"] = "PASS"
             iteration_log.append(log_entry)
@@ -1111,6 +1177,8 @@ def run_verilator_loop(
 
 # Rilevazione loop senza progressi (ReChisel): stessa firma d'errore 2 volte di fila.
         signature = error_signature(test_out)
+        if not mxfp4_ok:
+            signature += "|MXFP4_MANCANTE"
         stuck_count = stuck_count + 1 if signature == last_signature else 0
         last_signature = signature
 
@@ -1119,6 +1187,12 @@ def run_verilator_loop(
                                   f"rigenero modulo e testbench da zero (iterazione {i})")
             fixer.reset_history()
             retry_note = tail(test_out, 800)
+            if not mxfp4_ok:
+                retry_note = (
+                    "Il tentativo precedente NON usava affatto il Bundle MXFP4 "
+                    "(nessun 'import mxfp4._', ingressi/uscite dichiarati come UInt "
+                    "semplici invece che MXFP4) — questo va corretto nel nuovo tentativo.\n\n"
+                ) + retry_note
             code = run_coder(plan, spec, coder, retry_note=retry_note, temperature=0.7)
             testbench = run_tester(code, plan, tester, temperature=0.7)
             log_entry["escaped"] = True
@@ -1137,6 +1211,15 @@ def run_verilator_loop(
             f"Testbench (NON modificabile, deve restare compatibile con l'io del modulo):\n"
             f"{testbench}\n\n"
         )
+        if not mxfp4_ok:
+            fix_prompt += (
+                "PROBLEMA CRITICO: il modulo NON usa affatto il formato MXFP4 "
+                "richiesto dalla specifica — manca 'import mxfp4._' e gli ingressi/"
+                "uscite sono dichiarati come UInt semplici invece che come MXFP4. "
+                "Riscrivi il modulo usando il Bundle MXFP4 per gli ingressi/uscite "
+                "indicati come MXFP4 nella specifica/piano, mantenendo la "
+                "compatibilità con il testbench.\n\n"
+            )
         if failure_lines:
             fix_prompt += f"Righe di errore rilevanti:\n{failure_lines}\n\n"
         fix_prompt += (
@@ -1234,6 +1317,7 @@ def save_outputs(
             f"| Verifica | Risultato |\n|---|---|\n"
             f"| LLM Reviewer | `{'PASS' if it['review_llm_pass'] else 'ISSUES'}` |\n"
             f"| sbt compile  | `{'OK' if it['compile_ok'] else 'FAIL'}` |\n"
+            f"| Usa MXFP4    | `{'SI' if it.get('mxfp4_ok', True) else 'NO'}` |\n"
             f"| Fix applicato | `{it['fix_applicato']}` |\n"
         )
         if it.get("diagnosi"):
@@ -1250,6 +1334,7 @@ def save_outputs(
             f"`{label}`\n\n"
             f"| Verifica | Risultato |\n|---|---|\n"
             f"| sbt test (Verilator) | `{'OK' if it['verilator_ok'] else 'FAIL'}` |\n"
+            f"| Usa MXFP4    | `{'SI' if it.get('mxfp4_ok', True) else 'NO'}` |\n"
             f"| Fix applicato | `{it['fix_applicato']}` |\n"
         )
         if it.get("diagnosi"):
