@@ -129,6 +129,15 @@ def error_signature(text: str) -> str:
     basis = re.sub(r"(chisel_check|amaranth_check)_\S+", r"\1_X", basis)
     basis = re.sub(r"/mnt/\S+", "PATH", basis)
     basis = re.sub(r"[A-Za-z]:\\\S+", "PATH", basis)
+# sbt/verilator/pytest spesso terminano con una riga di riepilogo tipo
+# "Total time: 2 s, completed 10 ago 2026, 14:11:11": l'orario HH:MM:SS
+# cambia a ogni iterazione anche a parità di errore reale, e senza questa
+# normalizzazione la firma non converge MAI due volte di fila — osservato
+# concretamente in un run reale dove lo stesso identico errore di
+# compilazione ("object Driver is not a member of package chisel3") si è
+# ripetuto per 3 iterazioni consecutive senza mai far scattare l'escape,
+# proprio perché il timestamp finale differiva ogni volta.
+    basis = re.sub(r"\b\d{1,2}:\d{2}:\d{2}\b", "TIME", basis)
     basis = re.sub(r"\d{4,}", "N", basis)
     basis = re.sub(r"\s+", " ", basis).strip()
     return basis[:300]
