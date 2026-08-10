@@ -26,7 +26,7 @@ for _stream in (sys.stdout, sys.stderr):
 #  Configurazione generale.
 # ═══════════════════════════════════════════════════════════════════════
 DEFAULT_HOST   = "http://localhost:11434"
-MAX_FIX_ITER   = 50    # Limite di iterazioni per evitare loop infiniti.
+MAX_FIX_ITER   = 10    # Limite di iterazioni per evitare loop infiniti.
 OLLAMA_TIMEOUT = 600
 
 RECOMMENDED_MODELS = [
@@ -431,6 +431,15 @@ REGOLE OBBLIGATORIE:
     più di due operandi MXFP4 (es. un "full adder" con A, B, Cin), applica
     l'algoritmo in sequenza: prima somma i primi due, poi somma il risultato
     con il terzo.
+12. Questo file contiene SOLO il modulo hardware (class X extends Module).
+    NON includere MAI codice o import di test (org.scalatest.*,
+    AnyFlatSpec, ChiselScalatestTester, "behavior of", "it should ... in {",
+    ".poke(", ".expect(", "shouldBe", "test(new X)", "emitVerilogNet"): il
+    testbench è un file SEPARATO, generato dopo da un altro agente — se lo
+    anticipi qui ottieni errori come "not found: value behavior"/"not found:
+    value it"/"object scalatest is not a member of package org", perché
+    quelle keyword non esistono senza gli import di ScalaTest (che il
+    modulo, di per sé, non deve avere).
 
 Rispondi con SOLO il codice Scala/Chisel.
 Non usare markdown (no ```), nessun testo prima o dopo il codice.
@@ -459,6 +468,11 @@ CHECKLIST DA VERIFICARE:
       per dichiarare porte/segnali ("Input(MXFP4(bits))" o "new MXFP4(bits)"
       sono entrambi errati — per le porte serve "new MXFP4"/"MXFP4()" senza argomenti)
   [ ] Nessun import o riferimento a librerie inesistenti (oltre a chisel3 e mxfp4)
+  [ ] Nessun codice o import di test nel file del modulo (org.scalatest.*,
+      AnyFlatSpec, ChiselScalatestTester, "behavior of", "it should ... in {",
+      ".poke(", ".expect(", "shouldBe", "test(new X)", "emitVerilogNet"): il
+      modulo contiene SOLO "class X extends Module { ... }", il testbench è
+      un file separato generato da un altro agente
 
 REGOLA IMPORTANTE: la checklist sopra è la SOLA base per dire ISSUES. Se il
 codice compila, rispetta ogni punto della checklist ed è funzionalmente
@@ -543,6 +557,15 @@ REGOLE:
    (compilazione o simulazione), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
    modificare l'interfaccia io se non strettamente necessario.
+8. Il file che correggi contiene SOLO il modulo (class X extends Module):
+   se il codice da correggere contiene codice o import di test
+   (org.scalatest.*, AnyFlatSpec, ChiselScalatestTester, "behavior of",
+   "it should ... in {", ".poke(", ".expect(", "shouldBe", "test(new X)",
+   "emitVerilogNet"), RIMUOVILO — non appartiene al modulo, il testbench è
+   un file separato. Errori come "not found: value behavior"/"not found:
+   value it"/"object scalatest is not a member of package org" indicano
+   esattamente questo problema: codice di test finito per errore nel file
+   del modulo.
 
 FORMATO OBBLIGATORIO DELLA RISPOSTA:
 Prima riga: "Diagnosi: " seguito da UNA frase che spiega la causa radice
@@ -794,6 +817,30 @@ CHISEL_KNOWLEDGE_BASE = [
         "hint": ("In Chisel '.asUInt'/'.asSInt'/'.asBool' sono valori, non metodi: chiamarli con "
                  "le parentesi (es. '.asSInt()') causa 'cannot be applied to ()' — stesso problema "
                  "di '.litValue()'. Togli le parentesi: '.asUInt', '.asSInt', '.asBool' senza ()."),
+    },
+    {
+        "triggers": ["not found: value behavior", "not found: value it ", "not found: value it\n",
+                     "object scalatest is not a member of package org", "shouldbe is not a member",
+                     "not found: value emitverilognet"],
+        "hint": ("Il file del MODULO contiene sintassi che appartiene solo al testbench "
+                 "(ScalaTest: 'behavior of', 'it should ... in {', '.shouldBe', import "
+                 "'org.scalatest.*', oppure 'emitVerilogNet'): il modulo deve contenere SOLO "
+                 "'class NomeModulo extends Module { val io = IO(...); ... }', senza alcun "
+                 "codice o import di test — rimuovi ogni riga di quel tipo, il testbench viene "
+                 "generato a parte in un file separato."),
+    },
+    {
+        "triggers": ["not found: type mxfp4", "not found: value mxfp4"],
+        "hint": ("'not found: type/value MXFP4' significa che manca 'import mxfp4._' in cima "
+                 "al file: senza quell'import il Bundle MXFP4 (e le sue utility encode/decode) "
+                 "non sono visibili nel modulo."),
+    },
+    {
+        "triggers": ["value w is not a member of int", "not found: type module",
+                     "not found: value input", "not found: value output"],
+        "hint": ("Errori come '.W' non disponibile su un Int, o 'Module'/'Input'/'Output' non "
+                 "trovati, indicano import mancanti: le prime due righe del file devono essere "
+                 "SEMPRE 'import chisel3._' e 'import chisel3.util._', senza eccezioni."),
     },
 ]
 
@@ -1156,6 +1203,13 @@ REGOLE OBBLIGATORIE:
 
     Adatta i nomi (io_a/io_b/uscita) ai segnali reali della specifica. Se ci
     sono più di due operandi MXFP4, applica l'algoritmo in sequenza.
+14. Questo file contiene SOLO il modulo hardware (class X(Elaboratable)).
+    NON includere MAI codice di test (amaranth.sim.Simulator, "async def
+    bench(ctx)", "sim.add_testbench", "ctx.set"/"ctx.get", "assert",
+    "print("): il testbench è un file SEPARATO, generato dopo da un altro
+    agente — se lo anticipi qui il modulo non elabora (Fragment.get fallisce
+    perché contiene codice che non è hardware) e il toolchain lo rigetta
+    comunque.
 
 Rispondi con SOLO il codice Python. Non usare markdown (no ```), nessun
 testo prima o dopo il codice.
@@ -1181,6 +1235,10 @@ CHECKLIST DA VERIFICARE:
       l'algoritmo decodifica/allinea/somma/arrotonda-satura
   [ ] Nessun import o riferimento a librerie inesistenti (oltre ad amaranth
       e mxfp4)
+  [ ] Nessun codice di test nel file del modulo (amaranth.sim.Simulator,
+      "async def bench(ctx)", "sim.add_testbench", "ctx.set"/"ctx.get",
+      asserzioni): il modulo contiene SOLO "class X(Elaboratable): ...", il
+      testbench è un file separato generato da un altro agente
   [ ] Sintassi/indentazione Python valide, parentesi bilanciate
 
 REGOLA IMPORTANTE: la checklist sopra è la SOLA base per dire ISSUES. Se il
@@ -1282,6 +1340,11 @@ REGOLE:
    pysim o lint Verilator), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
    modificare gli attributi PORTS se non strettamente necessario.
+9. Il file che correggi contiene SOLO il modulo (class X(Elaboratable)): se
+   il codice da correggere contiene codice di test (amaranth.sim.Simulator,
+   "async def bench(ctx)", "sim.add_testbench", "ctx.set"/"ctx.get",
+   asserzioni), RIMUOVILO — non appartiene al modulo, il testbench è un file
+   separato.
 
 FORMATO OBBLIGATORIO DELLA RISPOSTA:
 Prima riga: "Diagnosi: " seguito da UNA frase che spiega la causa radice
