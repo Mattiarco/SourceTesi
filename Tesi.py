@@ -324,6 +324,15 @@ class HDLBackend(ABC):
     def check_uses_shared_types(self, code: str) -> bool: ...
 
     @abstractmethod
+    def contains_test_leakage(self, code: str) -> bool:
+        """True se il modulo contiene codice/API che appartengono solo al
+        testbench (backstop non-LLM: gli errori di compilazione reali
+        mostrano solo un sottoscopo rotante di simboli mancanti a ogni
+        iterazione — mai l'intero quadro — quindi affidarsi solo a quelli
+        lascia il Fixer a rincorrere sintomi diversi dello stesso problema
+        di fondo invece di vederlo in un colpo solo)."""
+
+    @abstractmethod
     def retrieve_hints(self, text: str) -> str: ...
 
     @abstractmethod
@@ -854,6 +863,27 @@ def retrieve_hints(text: str, kb: list[dict]) -> str:
     return f"Suggerimenti noti (da errori osservati in precedenza su questo progetto):\n{bullets}\n"
 
 
+# Backstop non-LLM per "codice di test finito nel file del modulo": osservato
+# concretamente su DUE run reali con DUE modelli diversi (llama3:latest e
+# qwen2.5-coder:7b), ciascuno con un vocabolario diverso di API ChiselTest/
+# ScalaTest allucinate (behavior of/it should/emitVerilogNet nel primo caso;
+# ChiselScalatestTester/Matchers/VerilatorBackendAnnotation/test(new nel
+# secondo) — inseguire ogni variante una per una via retrieve_hints() è un
+# gioco del gatto col topo che non generalizza. Questo controllo cattura
+# l'intera classe di errore in un colpo solo, indipendentemente da quale
+# sottoinsieme di simboli mancanti sbt riporta in una data iterazione.
+CHISEL_TEST_MARKERS = (
+    "anyflatspec", "freespec", "chiselscalatesttester", "verilatorbackendannotation",
+    'behavior of "', 'it should "', ".poke(", ".expect(", "test(new ",
+    "org.scalatest", "peekpoketester",
+)
+
+
+def contains_chisel_test_leakage(code: str) -> bool:
+    low = code.lower()
+    return any(m in low for m in CHISEL_TEST_MARKERS)
+
+
 # Estrae codice Scala da una risposta LLM che potrebbe non rispettare
 # l'istruzione "solo codice, nessun markdown, nessun testo prima o dopo":
 #   1. se c'è un blocco fenced ```scala/``` con codice Chisel riconoscibile,
@@ -999,6 +1029,9 @@ class ChiselBackend(HDLBackend):
     def check_uses_shared_types(self, code: str) -> bool:
         low = code.lower()
         return "mxfp4._" in low or "new mxfp4" in low
+
+    def contains_test_leakage(self, code: str) -> bool:
+        return contains_chisel_test_leakage(code)
 
     def retrieve_hints(self, text: str) -> str:
         return retrieve_hints(text, CHISEL_KNOWLEDGE_BASE)
@@ -1534,6 +1567,23 @@ AMARANTH_KNOWLEDGE_BASE = [
     },
 ]
 
+# Stesso backstop non-LLM di CHISEL_TEST_MARKERS (vedi commento lì): codice
+# di test finito nel file del modulo, rilevato per pattern indipendentemente
+# da quale sottoinsieme di errori riporta l'elaborazione in una data
+# iterazione. Per Amaranth non c'è ancora evidenza diretta da un run reale
+# (osservata finora solo lato Chisel, con due modelli diversi) ma la causa è
+# architetturalmente identica — modulo e testbench generati separatamente —
+# quindi il controllo è aggiunto preventivamente con lo stesso criterio.
+AMARANTH_TEST_MARKERS = (
+    "amaranth.sim", "add_testbench", "add_process", "async def bench",
+    "ctx.set(", "ctx.get(", "sim.run(", "import unittest", "def test_",
+)
+
+
+def contains_amaranth_test_leakage(code: str) -> bool:
+    low = code.lower()
+    return any(m in low for m in AMARANTH_TEST_MARKERS)
+
 
 # Estrae codice Python da una risposta LLM che potrebbe non rispettare
 # l'istruzione "solo codice, nessun markdown, nessun testo prima o dopo":
@@ -1681,6 +1731,9 @@ class AmaranthBackend(HDLBackend):
     def check_uses_shared_types(self, code: str) -> bool:
         low = code.lower()
         return "mxfp4layout" in low and "ports" in low
+
+    def contains_test_leakage(self, code: str) -> bool:
+        return contains_amaranth_test_leakage(code)
 
     def retrieve_hints(self, text: str) -> str:
         return retrieve_hints(text, AMARANTH_KNOWLEDGE_BASE)
@@ -2136,14 +2189,18 @@ def run_review_fix_loop(
         if not types_ok:
             warn(f"Codice non usa i tipi MXFP4 condivisi richiesti da {backend.display_name}")
 
+        test_leak = backend.contains_test_leakage(code)
+        if test_leak:
+            warn("Codice del modulo contiene API/sintassi che appartengono solo al testbench")
+
         log_entry: dict = {
             "iterazione": i, "review_llm": review_result, "review_llm_pass": passed_llm,
             "compile_ok": compile_ok, "compile_output": tail(compile_out, 1200) if compile_out else "",
-            "mxfp4_ok": types_ok, "fix_applicato": False, "escaped": False,
+            "mxfp4_ok": types_ok, "test_leak": test_leak, "fix_applicato": False, "escaped": False,
             "diagnosi": "", "esito": "",
         }
 
-        tutto_ok = passed_llm and compile_ok and types_ok
+        tutto_ok = passed_llm and compile_ok and types_ok and not test_leak
         if tutto_ok:
             ok(f"Codice validato all'iterazione {i}")
             log_entry["esito"] = "PASS"
@@ -2159,6 +2216,8 @@ def run_review_fix_loop(
         signature = error_signature(current_error_text)
         if not types_ok:
             signature += "|TIPI_MXFP4_MANCANTI"
+        if test_leak:
+            signature += "|TEST_LEAK"
         stuck_count = stuck_count + 1 if signature == last_signature else 0
         last_signature = signature
 
@@ -2173,6 +2232,13 @@ def run_review_fix_loop(
                     f"Il tentativo precedente non usava affatto i tipi MXFP4 condivisi "
                     f"richiesti da {backend.display_name} — questo va corretto nel nuovo "
                     "tentativo.\n\n"
+                ) + retry_note
+            if test_leak:
+                retry_note = (
+                    "Il tentativo precedente conteneva codice/API di test (ScalaTest/"
+                    "ChiselTest o amaranth.sim a seconda del backend) dentro il file del "
+                    "modulo — il modulo deve contenere SOLO il circuito hardware, il "
+                    "testbench è un file separato generato dopo.\n\n"
                 ) + retry_note
             code = run_coder(plan, spec, backend, coder, retry_note=retry_note, temperature=0.7)
             log_entry["escaped"] = True
@@ -2190,6 +2256,15 @@ def run_review_fix_loop(
                 f"PROBLEMA CRITICO: il codice non usa i tipi MXFP4 condivisi richiesti da "
                 f"{backend.display_name}. Riscrivi il modulo usando quei tipi per gli "
                 "ingressi/uscite indicati come MXFP4 nella specifica/piano.\n\n"
+            )
+        if test_leak:
+            fix_prompt += (
+                "PROBLEMA CRITICO: il file contiene codice/API di test (ScalaTest/"
+                "ChiselTest o amaranth.sim a seconda del backend, es. import di test, "
+                "'behavior of'/'it should', '.poke'/'.expect', 'test(new ...)', "
+                "amaranth.sim.Simulator, 'async def bench'). RIMUOVI TUTTO questo codice: "
+                "il file deve contenere SOLO la definizione del modulo hardware, il "
+                "testbench è generato separatamente in un altro file.\n\n"
             )
         if not passed_llm:
             fix_prompt += f"Problemi rilevati da LLM Reviewer:\n{review_result}\n\n"
@@ -2268,14 +2343,18 @@ def run_test_fix_loop(
         if not types_ok:
             warn(f"Codice non usa i tipi MXFP4 condivisi richiesti da {backend.display_name}")
 
+        test_leak = backend.contains_test_leakage(code)
+        if test_leak:
+            warn("Codice del modulo contiene API/sintassi che appartengono solo al testbench")
+
         log_entry: dict = {
             "iterazione": i, "test_ok": test_ok,
             "test_output": tail(test_out, 1200) if test_out else "",
-            "mxfp4_ok": types_ok, "fix_applicato": False, "escaped": False,
+            "mxfp4_ok": types_ok, "test_leak": test_leak, "fix_applicato": False, "escaped": False,
             "diagnosi": "", "esito": "",
         }
 
-        if test_ok and types_ok:
+        if test_ok and types_ok and not test_leak:
             ok(f"Test verificati all'iterazione {i}")
             log_entry["esito"] = "PASS"
             iteration_log.append(log_entry)
@@ -2289,6 +2368,8 @@ def run_test_fix_loop(
         signature = error_signature(test_out)
         if not types_ok:
             signature += "|TIPI_MXFP4_MANCANTI"
+        if test_leak:
+            signature += "|TEST_LEAK"
         stuck_count = stuck_count + 1 if signature == last_signature else 0
         last_signature = signature
 
@@ -2302,6 +2383,11 @@ def run_test_fix_loop(
                     f"Il tentativo precedente non usava affatto i tipi MXFP4 condivisi "
                     f"richiesti da {backend.display_name} — questo va corretto nel nuovo "
                     "tentativo.\n\n"
+                ) + retry_note
+            if test_leak:
+                retry_note = (
+                    "Il tentativo precedente conteneva codice/API di test dentro il file "
+                    "del modulo — il modulo deve contenere SOLO il circuito hardware.\n\n"
                 ) + retry_note
             code = run_coder(plan, spec, backend, coder, retry_note=retry_note, temperature=0.7)
 # Il Tester NON usa temperatura alta come il Coder: il testbench ha
@@ -2329,6 +2415,13 @@ def run_test_fix_loop(
                 f"{backend.display_name}. Riscrivi il modulo usando quei tipi per gli "
                 "ingressi/uscite indicati come MXFP4 nella specifica/piano, mantenendo la "
                 "compatibilità con il testbench.\n\n"
+            )
+        if test_leak:
+            fix_prompt += (
+                "PROBLEMA CRITICO: il file del modulo contiene codice/API di test (import "
+                "di test, 'behavior of'/'it should', '.poke'/'.expect', 'test(new ...)', "
+                "amaranth.sim.Simulator, 'async def bench'). RIMUOVI TUTTO questo codice dal "
+                "modulo: deve contenere SOLO la definizione del circuito hardware.\n\n"
             )
         if failure_lines:
             fix_prompt += f"Righe di errore rilevanti:\n{failure_lines}\n\n"
@@ -2389,6 +2482,7 @@ def save_outputs(
             f"| LLM Reviewer | `{'PASS' if it['review_llm_pass'] else 'ISSUES'}` |\n"
             f"| {backend.compile_check_label} | `{'OK' if it['compile_ok'] else 'FAIL'}` |\n"
             f"| Usa tipi MXFP4 | `{'SI' if it.get('mxfp4_ok', True) else 'NO'}` |\n"
+            f"| Codice di test nel modulo | `{'SI (problema)' if it.get('test_leak') else 'NO'}` |\n"
             f"| Fix applicato | `{it['fix_applicato']}` |\n"
         )
         if it.get("diagnosi"):
@@ -2404,6 +2498,7 @@ def save_outputs(
             f"| Verifica | Risultato |\n|---|---|\n"
             f"| {backend.test_check_label} | `{'OK' if it['test_ok'] else 'FAIL'}` |\n"
             f"| Usa tipi MXFP4 | `{'SI' if it.get('mxfp4_ok', True) else 'NO'}` |\n"
+            f"| Codice di test nel modulo | `{'SI (problema)' if it.get('test_leak') else 'NO'}` |\n"
             f"| Fix applicato | `{it['fix_applicato']}` |\n"
         )
         if it.get("diagnosi"):
