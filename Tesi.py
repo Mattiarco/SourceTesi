@@ -26,7 +26,7 @@ for _stream in (sys.stdout, sys.stderr):
 #  Configurazione generale.
 # ═══════════════════════════════════════════════════════════════════════
 DEFAULT_HOST   = "http://localhost:11434"
-MAX_FIX_ITER   = 10    # Limite di iterazioni per evitare loop infiniti.
+MAX_FIX_ITER   = 50    # Limite di iterazioni per evitare loop infiniti.
 OLLAMA_TIMEOUT = 600
 
 RECOMMENDED_MODELS = [
