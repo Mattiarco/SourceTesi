@@ -333,6 +333,16 @@ class HDLBackend(ABC):
         di fondo invece di vederlo in un colpo solo)."""
 
     @abstractmethod
+    def looks_like_real_testbench(self, testbench: str) -> bool:
+        """True se il testbench contiene sintassi/API di test riconoscibili
+        (backstop non-LLM, simmetrico a contains_test_leakage: un run reale
+        ha mostrato un testbench svuotato a stringa vuota — perché conteneva
+        solo un duplicato del modulo che strip_duplicate_module ha rimosso —
+        passare comunque il toolchain con successo, dato che 'sbt test'/una
+        simulazione senza asserzioni ritorna comunque successo se non trova
+        nulla da eseguire: un 'PASS' del genere è un falso positivo)."""
+
+    @abstractmethod
     def retrieve_hints(self, text: str) -> str: ...
 
     @abstractmethod
@@ -1092,12 +1102,30 @@ class ChiselBackend(HDLBackend):
     # reali hanno mostrato il Coder generare un full adder UInt semplice
     # nonostante il piano richiedesse esplicitamente ingressi/uscite MXFP4,
     # senza che il Reviewer lo segnalasse.
+    # DELIBERATAMENTE case-sensitive (a differenza del resto del progetto,
+    # che normalizza tutto in minuscolo prima di confrontare): un run reale
+    # ha mostrato il modello ridefinire un proprio tipo locale 'MxFp4'
+    # (casing diverso dal vero 'MXFP4' del package condiviso) contenente
+    # 'new MxFp4' — un confronto case-insensitive lo scambiava per un uso
+    # legittimo del Bundle condiviso, dando un falso "SI" anche se il codice
+    # non importava affatto 'mxfp4._' e ridefiniva un tipo tutto suo.
     def check_uses_shared_types(self, code: str) -> bool:
-        low = code.lower()
-        return "mxfp4._" in low or "new mxfp4" in low
+        if "import mxfp4._" not in code:
+            return False
+        return re.search(r"\bnew\s+MXFP4\b|\bMXFP4\s*\(", code) is not None
 
     def contains_test_leakage(self, code: str) -> bool:
         return contains_chisel_test_leakage(code)
+
+    # Backstop simmetrico a contains_test_leakage: osservato in un run reale
+    # (qwen3.6, 2026-08-11) un testbench svuotato a stringa vuota — perché
+    # il Tester aveva rigenerato solo un duplicato del modulo, che
+    # strip_duplicate_module_scala ha correttamente rimosso non lasciando
+    # nient'altro — passare comunque 'sbt test' con successo (nessuna test
+    # suite trovata = nessun errore = returncode 0) e venire dichiarato PASS.
+    def looks_like_real_testbench(self, testbench: str) -> bool:
+        low = testbench.lower()
+        return any(m in low for m in CHISEL_TEST_MARKERS)
 
     def retrieve_hints(self, text: str) -> str:
         return retrieve_hints(text, CHISEL_KNOWLEDGE_BASE)
@@ -1157,6 +1185,23 @@ class ChiselBackend(HDLBackend):
             (test_dir / f"{stem}Test.scala").write_text(testbench, encoding="utf-8")
             result = self._run_sbt(["test"], tmp, timeout=300, via_wsl=self.use_wsl_verilator)
             output  = (result.stdout + result.stderr).strip()
+            # 'sbt test' ritorna returncode 0 anche quando compila con successo
+            # ma non trova NESSUNA test suite da eseguire (es. testbench vuoto
+            # o senza una classe ChiselScalatestTester valida) — osservato
+            # concretamente in un run reale dove un testbench svuotato a
+            # stringa vuota ha comunque prodotto 'PASS'. ScalaTest stampa
+            # sempre questa riga di riepilogo quando esegue almeno un test,
+            # sia in caso di successo che di fallimento: usarla come prova
+            # positiva che è successo qualcosa, non solo che nulla è esploso.
+            ran_a_test = re.search(r"total number of tests run:\s*[1-9]", output, re.IGNORECASE)
+            if result.returncode == 0 and not ran_a_test:
+                output += (
+                    "\n[PIPELINE] 'sbt test' ha avuto successo ma non risulta che sia stato "
+                    "eseguito alcun test reale (nessuna riga 'Total number of tests run' con "
+                    "un numero positivo nell'output) — il testbench e' probabilmente vuoto o "
+                    "privo di una test suite valida."
+                )
+                return False, output
             return result.returncode == 0, output
         except subprocess.TimeoutExpired:
             return False, "sbt test (Verilator) timeout (>300s)"
@@ -1801,6 +1846,16 @@ class AmaranthBackend(HDLBackend):
     def contains_test_leakage(self, code: str) -> bool:
         return contains_amaranth_test_leakage(code)
 
+    # Simmetrico alla versione Chisel: qui run_tests() già richiede la
+    # stringa positiva 'RISULTATO: PASS' stampata dal testbench stesso, non
+    # solo returncode 0, quindi un testbench vuoto non può già dare un falso
+    # PASS (risulterebbe comunque False). Aggiunto per coerenza
+    # architetturale con l'ABC e come segnale diagnostico più chiaro nel
+    # log/report rispetto a un generico fallimento di pysim.
+    def looks_like_real_testbench(self, testbench: str) -> bool:
+        low = testbench.lower()
+        return any(m in low for m in AMARANTH_TEST_MARKERS)
+
     def retrieve_hints(self, text: str) -> str:
         return retrieve_hints(text, AMARANTH_KNOWLEDGE_BASE)
 
@@ -2413,14 +2468,19 @@ def run_test_fix_loop(
         if test_leak:
             warn("Codice del modulo contiene API/sintassi che appartengono solo al testbench")
 
+        testbench_valid = backend.looks_like_real_testbench(testbench)
+        if not testbench_valid:
+            warn("Il testbench è vuoto o privo di sintassi di test riconoscibile")
+
         log_entry: dict = {
             "iterazione": i, "test_ok": test_ok,
             "test_output": tail(test_out, 1200) if test_out else "",
-            "mxfp4_ok": types_ok, "test_leak": test_leak, "fix_applicato": False, "escaped": False,
+            "mxfp4_ok": types_ok, "test_leak": test_leak, "testbench_valid": testbench_valid,
+            "fix_applicato": False, "escaped": False,
             "diagnosi": "", "esito": "",
         }
 
-        if test_ok and types_ok and not test_leak:
+        if test_ok and types_ok and not test_leak and testbench_valid:
             ok(f"Test verificati all'iterazione {i}")
             log_entry["esito"] = "PASS"
             iteration_log.append(log_entry)
@@ -2430,6 +2490,33 @@ def run_test_fix_loop(
             log_entry["esito"] = "MAX_ITER_REACHED"
             iteration_log.append(log_entry)
             break
+
+        # Un testbench vuoto/senza sintassi di test non è qualcosa che il
+        # Fixer può correggere (agisce solo sul modulo, e il testbench è
+        # esplicitamente "NON modificabile" nel suo prompt): l'unica strada
+        # è rigenerare subito modulo+testbench insieme, senza aspettare che
+        # il meccanismo normale di stuck-count/escape se ne accorga — un
+        # 'sbt test'/una simulazione senza asserzioni può risultare 'OK' per
+        # più iterazioni di fila (nessun errore da segnalare) e mascherare
+        # il problema fino a MAX_ITER_REACHED, come osservato in un run reale.
+        if not testbench_valid:
+            agent_step("ESCAPE", f"Testbench vuoto o non valido: rigenero modulo e testbench "
+                                  f"da zero (iterazione {i})")
+            fixer.reset_history()
+            retry_note = (
+                "Il tentativo precedente ha prodotto un testbench vuoto o senza alcuna "
+                "sintassi di test riconoscibile (probabilmente una duplicazione del modulo, "
+                "rimossa automaticamente perché priva di codice di test reale): genera un "
+                "testbench completo con asserzioni vere.\n\n"
+            ) + backend.critical_reminders
+            code = run_coder(plan, spec, backend, coder, retry_note=retry_note, temperature=0.7)
+            testbench = run_tester(code, plan, backend, tester, temperature=0.2)
+            log_entry["escaped"] = True
+            log_entry["esito"] = "ESCAPED_RESTART"
+            iteration_log.append(log_entry)
+            stuck_count = 0
+            last_signature = None
+            continue
 
         signature = error_signature(test_out)
         if not types_ok:
@@ -2565,6 +2652,7 @@ def save_outputs(
             f"| {backend.test_check_label} | `{'OK' if it['test_ok'] else 'FAIL'}` |\n"
             f"| Usa tipi MXFP4 | `{'SI' if it.get('mxfp4_ok', True) else 'NO'}` |\n"
             f"| Codice di test nel modulo | `{'SI (problema)' if it.get('test_leak') else 'NO'}` |\n"
+            f"| Testbench valido | `{'SI' if it.get('testbench_valid', True) else 'NO (vuoto/senza test)'}` |\n"
             f"| Fix applicato | `{it['fix_applicato']}` |\n"
         )
         if it.get("diagnosi"):
