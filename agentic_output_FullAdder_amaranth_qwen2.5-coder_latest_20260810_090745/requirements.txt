@@ -1,2 +1,0 @@
-amaranth>=0.5
-amaranth-yosys>=0.50  # opzionale: solo per l'export Verilog + lint Verilator
