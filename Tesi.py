@@ -440,6 +440,17 @@ REGOLE OBBLIGATORIE:
     più di due operandi MXFP4 (es. un "full adder" con A, B, Cin), applica
     l'algoritmo in sequenza: prima somma i primi due, poi somma il risultato
     con il terzo.
+    ATTENZIONE: il Bundle MXFP4 espone SOLO i tre campi hardware .sign/.exp/
+    .mant (accesso diretto, es. "io.a.sign"). NON esistono metodi di istanza
+    ".decode()"/".encode()"/".add()" su un segnale MXFP4, né un helper
+    esterno come "FloatingPoint.add(...)": sono API inventate che non
+    compilano ("value decode is not a member of mxfp4.MXFP4", "not found:
+    value FloatingPoint"). "MXFP4.decode(bits: Int): Double" e
+    "MXFP4.encode(value: Double): Int" nel companion object sono utility
+    Scala pure (Int/Double), utili solo a tempo di elaborazione/test, MAI
+    utilizzabili su un segnale hardware: l'addizione hardware va sempre
+    implementata con l'algoritmo di questo punto usando direttamente
+    .sign/.exp/.mant, mai chiamando decode/encode/add su un segnale.
 12. Questo file contiene SOLO il modulo hardware (class X extends Module).
     NON includere MAI codice o import di test (org.scalatest.*,
     AnyFlatSpec, ChiselScalatestTester, "behavior of", "it should ... in {",
@@ -562,6 +573,12 @@ REGOLE:
 
    Adatta i nomi dei segnali (io.a/io.b) al modulo da correggere. Se ci sono
    più di due operandi MXFP4 (es. Cin), applica l'algoritmo in sequenza.
+   ATTENZIONE: se il codice da correggere chiama ".decode()"/".encode()"/
+   ".add()" su un segnale MXFP4, o un helper inventato come
+   "FloatingPoint.add(...)", è quello l'errore di fondo (queste API non
+   esistono: il Bundle MXFP4 espone solo .sign/.exp/.mant) — sostituisci
+   con l'algoritmo sopra applicato direttamente a .sign/.exp/.mant, anche
+   se non è esplicitamente nella lista di issues.
 7. Se gli errori derivano da un'esecuzione di test falliti su Verilator
    (compilazione o simulazione), correggi la logica del modulo affinché il
    comportamento simulato corrisponda a quello atteso dal testbench, senza
@@ -731,7 +748,9 @@ CRITICAL_REMINDERS_CHISEL = (
     "- Usa SEMPRE 'import mxfp4._' e dichiara ingressi/uscite MXFP4 con 'new MXFP4', mai UInt semplice.\n"
     "- NON istanziare 'Module(new XOR/AND/OR)': non esistono.\n"
     "- Un segnale MXFP4 è un Bundle: NON ha operatori ^/&/|. Per sommare valori MXFP4 usa "
-    "l'algoritmo decodifica/allinea/somma/arrotonda-satura descritto nelle regole, non XOR/AND/OR.\n\n"
+    "l'algoritmo decodifica/allinea/somma/arrotonda-satura descritto nelle regole, non XOR/AND/OR.\n"
+    "- Un segnale MXFP4 NON ha metodi .decode()/.encode()/.add(), e non esiste nessun helper "
+    "esterno tipo 'FloatingPoint.add(...)': usa SOLO i campi .sign/.exp/.mant direttamente.\n\n"
 )
 
 # Base di conoscenza di errori Chisel/Scala osservati per davvero durante lo
@@ -761,11 +780,48 @@ CHISEL_KNOWLEDGE_BASE = [
                  "'\"...\" in { ... }': sono due stili di ScalaTest incompatibili tra loro."),
     },
     {
+        # Trigger specifico ('test(new ') invece del generico "not found:
+        # type/value": quel trigger generico intercettava QUALSIASI simbolo
+        # non risolto (es. 'not found: value Cout_dec' per un bug di pattern
+        # matching Scala, vedi entry sotto) e ci appiccicava sopra questo
+        # suggerimento sbagliato/fuorviante — osservato concretamente in un
+        # run reale del 2026-08-10.
         "triggers": ["not found: type", "not found: value"],
+        "hint_requires_all": ["test(new "],
         "hint": ("Il nome della classe del modulo usato nel testbench (es. 'test(new "
                  "NomeModulo)') deve corrispondere ESATTAMENTE al nome della classe che "
                  "estende Module nel file del modulo — controlla che non siano stati "
                  "rinominati in modo indipendente."),
+    },
+    {
+        # Osservato per davvero: qwen2.5-coder ha scritto ripetutamente
+        # 'val (S_dec, Cout_dec) = FloatingPoint.add(...)' — Scala tratta un
+        # identificatore che inizia con maiuscola in posizione di pattern
+        # come un riferimento a un valore ESISTENTE (equality match), non
+        # come un nuovo binding: da qui 'not found: value Cout_dec' anche
+        # se la variabile non era mai stata dichiarata prima. Il messaggio
+        # del compilatore lo spiega esplicitamente, uso quella frase esatta
+        # come trigger (altissima precisione, nessun falso positivo noto).
+        "triggers": ["identifiers that begin with uppercase are not pattern variables"],
+        "hint": ("Il destructuring 'val (NomeA, NomeB) = espressione' fallisce se NomeA/NomeB "
+                 "iniziano con lettera maiuscola: Scala li tratta come riferimenti a valori "
+                 "già esistenti da confrontare, non come nuovi binding, e dà 'not found: "
+                 "value NomeX'. Rinomina le variabili con iniziale minuscola (es. 's_dec', "
+                 "'cout_dec'), oppure — meglio ancora in questo progetto — non serve nessun "
+                 "destructuring: l'addizione MXFP4 va scritta con l'algoritmo "
+                 "decodifica/allinea/somma/arrotonda-satura su .sign/.exp/.mant, non con una "
+                 "funzione esterna che ritorna una tupla."),
+    },
+    {
+        "triggers": ["decode is not a member of mxfp4", "encode is not a member of mxfp4",
+                     "not found: value floatingpoint", "add is not a member of mxfp4"],
+        "hint": ("Un segnale MXFP4 NON ha metodi di istanza .decode()/.encode()/.add(), e non "
+                 "esiste nessun helper esterno come 'FloatingPoint.add(...)': espone SOLO i "
+                 "campi hardware .sign/.exp/.mant (es. 'io.a.sign'). 'MXFP4.decode(bits: Int)' "
+                 "e 'MXFP4.encode(value: Double)' nel companion object sono utility Scala pure "
+                 "su Int/Double, non applicabili a un segnale hardware. Implementa l'addizione "
+                 "con l'algoritmo decodifica/allinea/somma/arrotonda-satura descritto nel "
+                 "system prompt, operando direttamente su .sign/.exp/.mant."),
     },
     {
         "triggers": ["reassignment to val", "value io is not a member"],
@@ -856,7 +912,17 @@ CHISEL_KNOWLEDGE_BASE = [
 
 def retrieve_hints(text: str, kb: list[dict]) -> str:
     text_low = text.lower()
-    matched = [entry["hint"] for entry in kb if any(t in text_low for t in entry["triggers"])]
+    matched = []
+    for entry in kb:
+        if not any(t in text_low for t in entry["triggers"]):
+            continue
+        # "hint_requires_all" restringe un trigger generico (es. "not found:
+        # value", che matcherebbe QUALSIASI simbolo non risolto): l'entry
+        # scatta solo se anche queste sottostringhe aggiuntive sono presenti.
+        requires_all = entry.get("hint_requires_all", ())
+        if requires_all and not all(r in text_low for r in requires_all):
+            continue
+        matched.append(entry["hint"])
     if not matched:
         return ""
     bullets = "\n".join(f"- {h}" for h in matched)
