@@ -24,6 +24,8 @@ class AnthropicProvider(LLMProvider):
         super().__init__(model, **kw)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._sdk = None
+        #: alcuni modelli recenti rifiutano `temperature`; lo disattiviamo al volo
+        self.send_temperature = True
         try:  # optional fast path
             import anthropic  # type: ignore
 
@@ -37,14 +39,29 @@ class AnthropicProvider(LLMProvider):
         if not self.api_key:
             raise LLMError("ANTHROPIC_API_KEY non impostata (export ANTHROPIC_API_KEY=sk-ant-...).")
         model = overrides.get("model", self.model)
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "max_tokens": overrides.get("max_tokens", self.max_tokens),
-            "temperature": overrides.get("temperature", self.temperature),
             "system": system,
             "messages": [m.as_dict() for m in messages],
         }
+        temp = overrides.get("temperature", self.temperature)
+        if self.send_temperature and temp is not None:
+            body["temperature"] = temp
 
+        try:
+            return self._call(body)
+        except LLMError as e:
+            # "`temperature` is deprecated for this model" -> riprova senza
+            if "temperature" in str(e).lower() and "temperature" in body:
+                self.send_temperature = False
+                body.pop("temperature")
+                return self._call(body)
+            raise
+
+    # ------------------------------------------------------------- trasporto
+    def _call(self, body: dict[str, Any]) -> LLMResponse:
+        model = body["model"]
         if self._sdk is not None:
             try:
                 r = self._sdk.messages.create(**body)
@@ -80,7 +97,23 @@ class AnthropicProvider(LLMProvider):
                            usage.get("output_tokens", 0), raw=data)
 
     # ---------------------------------------------------------------- health
-    def health_check(self) -> tuple[bool, str]:
+    def health_check(self, live: bool = True) -> tuple[bool, str]:
         if not self.api_key:
             return False, "ANTHROPIC_API_KEY mancante"
-        return True, f"Claude ok (modello '{self.model}', SDK={'sì' if self._sdk else 'no, urllib'})"
+        sdk = "SDK" if self._sdk else "urllib"
+        if not live:
+            return True, f"chiave presente (modello '{self.model}', {sdk})"
+        # chiamata minima: verifica davvero chiave, modello e connettività
+        try:
+            self.chat("Rispondi con una sola parola.", [Message("user", "ping")],
+                      max_tokens=4, temperature=0)
+        except LLMError as e:
+            msg = str(e)
+            if "401" in msg or "authentication" in msg.lower():
+                return False, "chiave rifiutata (401): rigenerala su console.anthropic.com"
+            if "404" in msg or "not_found" in msg.lower():
+                return False, f"modello '{self.model}' inesistente per questa chiave"
+            if "429" in msg:
+                return False, "rate limit / credito esaurito (429)"
+            return False, f"chiamata fallita: {msg[:160]}"
+        return True, f"Claude ok e raggiungibile (modello '{self.model}', {sdk})"

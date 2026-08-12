@@ -63,7 +63,7 @@ class OllamaProvider(LLMProvider):
         )
 
     # ---------------------------------------------------------------- health
-    def health_check(self) -> tuple[bool, str]:
+    def health_check(self, live: bool = True) -> tuple[bool, str]:
         try:
             with urllib.request.urlopen(f"{self.host}/api/tags", timeout=10) as r:
                 tags = json.loads(r.read().decode("utf-8"))

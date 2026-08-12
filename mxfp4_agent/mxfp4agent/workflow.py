@@ -48,7 +48,9 @@ class Workflow:
                            "event": event, **kw})
 
     def preflight(self) -> tuple[bool, str]:
-        ok, detail = self.providers["planner"].health_check()
+        # live=False: la vera prova è la chiamata del Planner subito dopo, che
+        # riporta comunque l'errore HTTP. Evitiamo una chiamata a pagamento in più.
+        ok, detail = self.providers["planner"].health_check(live=False)
         self.log.stage("system", f"LLM: {detail}")
         rep = tool_report()
         self.log.info("toolchain:\n" + format_tool_report(rep))

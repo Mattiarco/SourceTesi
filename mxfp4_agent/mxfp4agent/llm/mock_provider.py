@@ -33,5 +33,5 @@ class MockProvider(LLMProvider):
         n_in = sum(len(m.content) for m in messages) // 4
         return LLMResponse(text, self.model, self.name, n_in, len(text) // 4)
 
-    def health_check(self) -> tuple[bool, str]:
+    def health_check(self, live: bool = True) -> tuple[bool, str]:
         return True, "Mock provider (nessuna rete, output deterministico)"

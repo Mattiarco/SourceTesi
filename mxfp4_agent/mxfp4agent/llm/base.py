@@ -77,8 +77,11 @@ class LLMProvider(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def health_check(self) -> tuple[bool, str]:
-        """Return (ok, human readable detail)."""
+    def health_check(self, live: bool = True) -> tuple[bool, str]:
+        """Return (ok, human readable detail).
+
+        ``live=False`` chiede un controllo economico (nessuna chiamata a pagamento).
+        """
 
     def describe(self) -> str:
         return f"{self.name}:{self.model}"

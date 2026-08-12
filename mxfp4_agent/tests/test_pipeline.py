@@ -112,6 +112,60 @@ def test_reviewer_never_overwrites_golden_header():
     assert merged[0].content == "GOLDEN"
 
 
+# -------------------------------------------------------- provider Anthropic
+def test_anthropic_retries_without_temperature():
+    """Alcuni modelli rifiutano `temperature`: il provider deve accorgersene e riprovare."""
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError, LLMResponse
+
+    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
+    seen = []
+
+    def fake_call(body):
+        seen.append(dict(body))
+        if "temperature" in body:
+            raise LLMError('Anthropic HTTP 400: {"message":"`temperature` is deprecated '
+                           'for this model."}')
+        return LLMResponse("ok", body["model"], "claude", 1, 1)
+
+    prov._call = fake_call
+    assert prov.complete("sys", "ciao") == "ok"
+    assert len(seen) == 2 and "temperature" in seen[0] and "temperature" not in seen[1]
+    # la disattivazione è persistente: niente 400 inutili nelle chiamate seguenti
+    assert prov.send_temperature is False
+    prov.complete("sys", "ancora")
+    assert len(seen) == 3 and "temperature" not in seen[2]
+
+
+def test_anthropic_other_errors_are_not_swallowed():
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError
+
+    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
+
+    def boom(body):
+        raise LLMError("Anthropic HTTP 401: authentication_error")
+
+    prov._call = boom
+    try:
+        prov.complete("sys", "ciao")
+    except LLMError as e:
+        assert "401" in str(e)
+    else:
+        raise AssertionError("l'errore doveva propagarsi")
+
+
+def test_anthropic_health_check_reports_401():
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError
+
+    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
+    prov._call = lambda body: (_ for _ in ()).throw(LLMError("Anthropic HTTP 401: bad key"))
+    ok, detail = prov.health_check(live=True)
+    assert not ok and "401" in detail
+    assert prov.health_check(live=False)[0] is True   # controllo economico: non chiama
+
+
 # -------------------------------------------------------------- end-to-end
 def test_end_to_end_mock_materializes_project(tmp_path):
     cfg = Config(request="dot product mxfp4 combinatorio", provider="mock",

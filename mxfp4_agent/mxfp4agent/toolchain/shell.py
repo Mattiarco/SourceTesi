@@ -35,8 +35,15 @@ class CmdResult:
 def run(cmd: list[str], cwd: Path | str | None = None, timeout: int = 900,
         env: dict | None = None) -> CmdResult:
     merged = {**os.environ, **(env or {})}
+    # Su Windows CreateProcess non applica PATHEXT: "sbt" non risolve a "sbt.BAT".
+    # Risolviamo noi l'eseguibile prima di lanciarlo.
+    resolved = list(cmd)
+    if not os.path.isabs(resolved[0]) and os.sep not in resolved[0]:
+        full = shutil.which(resolved[0])
+        if full:
+            resolved[0] = full
     try:
-        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True,
+        p = subprocess.run(resolved, cwd=str(cwd) if cwd else None, capture_output=True,
                            text=True, timeout=timeout, env=merged, errors="replace")
         return CmdResult(cmd, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired as e:
