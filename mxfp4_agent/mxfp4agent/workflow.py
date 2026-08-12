@@ -128,6 +128,7 @@ class Workflow:
 
         # --------------------------------------- TESTER + LOOP DI RIPARAZIONE
         last_report = None
+        prev_signature: str | None = None
         for rnd in range(cfg.max_fix_rounds + 1):
             self.log.stage("tester", f"round {rnd}: scrittura progetto ed esecuzione toolchain…")
             tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed, round_id=rnd)
@@ -156,6 +157,25 @@ class Workflow:
                 break
 
             fail = last_report.first_failure
+
+            # Se il codice cambia ma l'errore resta identico, il problema non è
+            # nel codice: è nel modo in cui invochiamo la toolchain. Continuare
+            # a "riparare" brucia round e token inseguendo un fantasma.
+            signature = self._signature(fail)
+            if signature == prev_signature:
+                msg = (f"Errore IDENTICO a quello del round precedente nella fase "
+                       f"'{fail.stage}', nonostante il codice sia cambiato.\n"
+                       f"Non è un bug del design generato: è l'invocazione della "
+                       f"toolchain a essere sospetta.\nControlla "
+                       f"{workdir}/logs/r{rnd}_{fail.stage}.log e riproduci il "
+                       f"comando a mano prima di spendere altri round.")
+                self.log.fail(msg)
+                self._t("workflow", "loop_detected", stage=fail.stage, round=rnd)
+                self._finalize(workdir, plan, files, False, msg)
+                return RunResult(False, plan, files, workdir, rnd, msg,
+                                 self.trace, self._stats())
+            prev_signature = signature
+
             self.log.stage("reviewer", f"fix round {rnd + 1} (fase: {fail.stage})…")
             if tres.notes:
                 self.log.block("diagnosi del tester", tres.notes, 1200)
@@ -179,6 +199,16 @@ class Workflow:
                          self.trace, self._stats())
 
     # -------------------------------------------------------------- finalize
+    @staticmethod
+    def _signature(fail) -> str:
+        """Impronta di un fallimento, insensibile a path assoluti e timestamp."""
+        import hashlib
+        import re
+
+        norm = re.sub(r"/[^\s:]+/", "/…/", fail.log)          # path
+        norm = re.sub(r"\d{2}:\d{2}:\d{2}|\b\d+[.,]\d+ s\b", "", norm)  # tempi
+        return f"{fail.stage}:{hashlib.sha1(norm.encode()).hexdigest()[:16]}"
+
     def _stats(self) -> dict:
         return {role: {"model": p.describe(), **p.stats} for role, p in self.providers.items()}
 

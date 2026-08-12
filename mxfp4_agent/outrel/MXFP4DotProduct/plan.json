@@ -1,0 +1,89 @@
+{
+  "module_name": "MXFP4DotProduct",
+  "meta_hdl": "chisel",
+  "rationale": "Chisel permette di parametrizzare K e di generare l'albero di somma con reduceTree; il datapath e' interamente intero quindi non serve libreria FP.",
+  "clocking": "combinational",
+  "parameters": [
+    {
+      "name": "k",
+      "value": 32,
+      "description": "elementi per blocco"
+    }
+  ],
+  "ports": [
+    {
+      "name": "a",
+      "dir": "in",
+      "width": 128,
+      "type": "UInt",
+      "description": "blocco A, elemento i nei bit [4i+3:4i]"
+    },
+    {
+      "name": "b",
+      "dir": "in",
+      "width": 128,
+      "type": "UInt",
+      "description": "blocco B"
+    },
+    {
+      "name": "scaleA",
+      "dir": "in",
+      "width": 8,
+      "type": "UInt",
+      "description": "scala E8M0 di A"
+    },
+    {
+      "name": "scaleB",
+      "dir": "in",
+      "width": 8,
+      "type": "UInt",
+      "description": "scala E8M0 di B"
+    },
+    {
+      "name": "accQ2",
+      "dir": "out",
+      "width": 32,
+      "type": "SInt",
+      "description": "accumulo intero in unita' 1/4"
+    },
+    {
+      "name": "expOut",
+      "dir": "out",
+      "width": 16,
+      "type": "SInt",
+      "description": "esponente risultante"
+    },
+    {
+      "name": "isNaN",
+      "dir": "out",
+      "width": 1,
+      "type": "Bool",
+      "description": "scala NaN"
+    }
+  ],
+  "algorithm": [
+    "Decodifica ogni nibble E2M1 in un intero con segno pari a mag*2 tramite LUT {0,1,2,3,4,6,8,12}.",
+    "Moltiplica gli interi a coppie: il prodotto e' esatto in unita' 1/4.",
+    "Somma con albero bilanciato usando +& per evitare overflow.",
+    "Calcola expOut = scaleA + scaleB - 254.",
+    "isNaN se una scala vale 0xFF."
+  ],
+  "test_plan": {
+    "kernel": "dot_product",
+    "num_random": 64,
+    "directed": [
+      "tutti zero",
+      "tutti +6 (saturazione)",
+      "subnormali 0.5",
+      "zero negativo",
+      "scala NaN"
+    ]
+  },
+  "risks": [
+    "larghezza dell'accumulatore insufficiente",
+    "ordine dei nibble invertito"
+  ],
+  "latency_cycles": 0,
+  "block_size": 32,
+  "coder_prompt": ""
+}

@@ -56,7 +56,10 @@ class ToolchainRunner:
     def __init__(self, root: Path, module: str, meta_hdl: str = "chisel",
                  sbt_timeout: int = 1800, verilator_timeout: int = 900,
                  sim_timeout: int = 300) -> None:
-        self.root = Path(root)
+        # SEMPRE assoluto: i comandi girano con cwd=self.root, quindi un path
+        # relativo verrebbe risolto due volte ("out/X/out/X/rtl/...") e Verilator
+        # non troverebbe l'RTL appena generato.
+        self.root = Path(root).resolve()
         self.module = module
         self.meta_hdl = meta_hdl
         self.sbt_timeout = sbt_timeout
@@ -121,7 +124,7 @@ class ToolchainRunner:
             return StageResult("lint", False, "Nessun file RTL in rtl/.")
         r = run(["verilator", "--lint-only", "-Wall", "-Wno-DECLFILENAME",
                  "-Wno-UNUSEDSIGNAL", "--top-module", self.module,
-                 *[str(f) for f in files]],
+                 *[str(f.relative_to(self.root)) for f in files]],
                 cwd=self.root, timeout=self.verilator_timeout)
         return StageResult("lint", r.ok, r.log)
 

@@ -236,6 +236,57 @@ def test_anthropic_health_check_reports_401():
     assert prov.health_check(live=False)[0] is True   # controllo economico: non chiama
 
 
+# ------------------------------------------------------ invocazione toolchain
+def test_runner_root_is_absolute_and_paths_are_relative(tmp_path):
+    """Bug reale: con outdir relativo, verilator cercava out/X/out/X/rtl/... ."""
+    import os
+
+    from mxfp4agent.toolchain.runner import ToolchainRunner
+
+    proj = tmp_path / "out" / "MyMod"
+    (proj / "rtl").mkdir(parents=True)
+    (proj / "rtl" / "MyMod.sv").write_text("module MyMod(); endmodule\n")
+
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        r = ToolchainRunner("out/MyMod", "MyMod")          # path RELATIVO
+        assert r.root.is_absolute()
+        files = r.rtl_files()
+        assert len(files) == 1
+        # i comandi girano con cwd=root: il path passato dev'essere relativo a root
+        rel = files[0].relative_to(r.root)
+        assert str(rel) == os.path.join("rtl", "MyMod.sv")
+        assert not str(rel).startswith("out")
+    finally:
+        os.chdir(cwd)
+
+
+def test_repeated_identical_failure_is_detected():
+    """Quattro round identici sono un bug della toolchain, non del design."""
+    from mxfp4agent.toolchain.runner import StageResult
+    from mxfp4agent.workflow import Workflow
+
+    a = StageResult("lint", False, "%Error: Cannot find file /home/x/out/M/rtl/M.sv")
+    b = StageResult("lint", False, "%Error: Cannot find file /other/path/out/M/rtl/M.sv")
+    c = StageResult("lint", False, "%Error: sintassi diversa")
+    # stesso errore a meno del path assoluto -> stessa impronta
+    assert Workflow._signature(a) == Workflow._signature(b)
+    assert Workflow._signature(a) != Workflow._signature(c)
+    # fasi diverse non collidono mai
+    assert Workflow._signature(StageResult("build", False, a.log)) != Workflow._signature(a)
+
+
+def test_coder_is_told_not_to_write_an_elaboration_entrypoint():
+    """Il Fixer aveva aggiunto un `object ...Main` seguendo una regola ambigua."""
+    from mxfp4agent.knowledge import full_context
+
+    ctx = full_context("chisel")
+    assert "NON scrivere alcun entry-point" in ctx
+    assert "_root_.circt.stage.ChiselStage" in ctx
+    assert "(-3).S(5.W)" in ctx      # trappola dei letterali negativi
+
+
 # -------------------------------------------------------------- end-to-end
 def test_end_to_end_mock_materializes_project(tmp_path):
     """Verifica lo scaffolding, NON la toolchain esterna.

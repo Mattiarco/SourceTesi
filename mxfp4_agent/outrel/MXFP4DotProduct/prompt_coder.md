@@ -1,11 +1,4 @@
-"""Testi di conoscenza iniettati nei prompt degli agenti.
 
-Sono la parte "prompt engineering" del sistema: un LLM generico sbaglia quasi
-sempre i dettagli di MXFP4 (bias, subnormali, saturazione, ordine dei nibble).
-Fornirli esplicitamente sposta il modello dal "ricordare" al "applicare".
-"""
-
-MXFP4_SPEC = r"""
 ### FORMATO MXFP4 (OCP Microscaling, rif. NVIDIA MXFP4/NVFP4)
 
 Un blocco MXFP4 = K elementi FP4 **E2M1** + 1 fattore di scala condiviso **E8M0**.
@@ -49,9 +42,8 @@ K standard = 32 (MXFP4). NVFP4 usa K = 16 e scala E4M3 — non confonderli.
   shared_exp  = floor(log2(amax)) - emax_elem,  con emax_elem = 2 per E2M1
   scale_E8M0  = clamp(shared_exp + 127, 0, 254)
   elemento_i  = round_to_nearest_even(x_i / 2^(scale-127)) con saturazione a +/-6
-"""
 
-CHISEL_RULES = r"""
+
 ### REGOLE CHISEL (Chisel 6.x / Scala 2.13) — vincolanti
 
 1. Import minimi e corretti:
@@ -88,20 +80,35 @@ CHISEL_RULES = r"""
    `chisel3.util.circt` per via di `import chisel3.util._` e non compila.)
 10. Vietato: `printf` in logica sintetizzabile, `require` su valori hardware,
     `.litValue` su segnali non costanti, `when` senza `.otherwise` su output.
-"""
 
-VERILOG_RULES = r"""
-### REGOLE SYSTEMVERILOG — vincolanti
-1. `module <Nome> ( ... );` con porte ANSI e tipi espliciti (`logic`).
-2. Sempre `always_comb` / `always_ff @(posedge clk)`; mai `always @(*)` misto.
-3. Nessun latch: in `always_comb` assegna un default a tutti gli output.
-4. Reset attivo alto sincrono `rst` salvo diversa indicazione.
-5. Niente costrutti non supportati da Verilator (`#delay` nella logica,
-   `initial` in RTL sintetizzabile, `real`).
-6. Larghezze esplicite ovunque; niente conversioni implicite firmate/non firmate.
-"""
 
-CHISEL_TB_PORTS = r"""
+### REGOLE TESTBENCH C++ PER VERILATOR — vincolanti
+1. File singolo `tb_<Nome>.cpp` con:
+     #include "V<Nome>.h"
+     #include "verilated.h"
+     #include <cstdio>, <cstdint>, <cstdlib>, <vector>
+2. `int main(int argc, char** argv)`:
+     Verilated::commandArgs(argc, argv);
+     auto* dut = new V<Nome>;
+   Alla fine: `dut->final(); delete dut; return failures ? 1 : 0;`
+3. Se il DUT è sequenziale definisci un helper:
+     auto tick = [&]{ dut->clk = 0; dut->eval(); dut->clk = 1; dut->eval(); };
+   e applica il reset per almeno 2 cicli prima dei vettori.
+   Se è puramente combinatorio NON pilotare clk/rst: basta `dut->eval()`.
+4. I vettori di test attesi arrivano dal golden model Python e sono inclusi come
+   `#include "test_vectors.h"` (array C generato automaticamente). NON
+   ricalcolare la semantica MXFP4 in C++: usa i valori attesi forniti.
+5. Ogni confronto stampa su fallimento:
+     printf("FAIL [%d] exp=0x%llx got=0x%llx\n", i, (unsigned long long)exp,
+            (unsigned long long)got);
+6. In fondo stampa ESATTAMENTE una di queste righe (il tester le cerca):
+     printf("TEST PASSED (%d vectors)\n", n);
+     printf("TEST FAILED (%d/%d)\n", failures, n);
+7. Segnali > 64 bit in Verilator sono array `WData` a 32 bit: accedi con
+   `dut->porta[k]`. Segnali <= 32 bit sono `uint32_t`, <= 64 bit `uint64_t`.
+8. Niente `std::cout` con `std::endl` in loop stretti; usa printf.
+
+
 ### NOMI DELLE PORTE NEL TESTBENCH (Chisel) — CAUSA DI ERRORE PIU' FREQUENTE
 
 Chisel **appiattisce il Bundle `io`** quando emette SystemVerilog: ogni campo
@@ -133,37 +140,8 @@ su clock/reset: e' atteso e innocuo.)
 
 Se invece il target e' SystemVerilog scritto a mano, le porte hanno esattamente
 il nome che hai dato tu, senza alcun prefisso.
-"""
 
-VERILATOR_TB_RULES = r"""
-### REGOLE TESTBENCH C++ PER VERILATOR — vincolanti
-1. File singolo `tb_<Nome>.cpp` con:
-     #include "V<Nome>.h"
-     #include "verilated.h"
-     #include <cstdio>, <cstdint>, <cstdlib>, <vector>
-2. `int main(int argc, char** argv)`:
-     Verilated::commandArgs(argc, argv);
-     auto* dut = new V<Nome>;
-   Alla fine: `dut->final(); delete dut; return failures ? 1 : 0;`
-3. Se il DUT è sequenziale definisci un helper:
-     auto tick = [&]{ dut->clk = 0; dut->eval(); dut->clk = 1; dut->eval(); };
-   e applica il reset per almeno 2 cicli prima dei vettori.
-   Se è puramente combinatorio NON pilotare clk/rst: basta `dut->eval()`.
-4. I vettori di test attesi arrivano dal golden model Python e sono inclusi come
-   `#include "test_vectors.h"` (array C generato automaticamente). NON
-   ricalcolare la semantica MXFP4 in C++: usa i valori attesi forniti.
-5. Ogni confronto stampa su fallimento:
-     printf("FAIL [%d] exp=0x%llx got=0x%llx\n", i, (unsigned long long)exp,
-            (unsigned long long)got);
-6. In fondo stampa ESATTAMENTE una di queste righe (il tester le cerca):
-     printf("TEST PASSED (%d vectors)\n", n);
-     printf("TEST FAILED (%d/%d)\n", failures, n);
-7. Segnali > 64 bit in Verilator sono array `WData` a 32 bit: accedi con
-   `dut->porta[k]`. Segnali <= 32 bit sono `uint32_t`, <= 64 bit `uint64_t`.
-8. Niente `std::cout` con `std::endl` in loop stretti; usa printf.
-"""
 
-COMMON_PITFALLS = r"""
 ### ERRORI RICORRENTI DA EVITARE (osservati su LLM in MXFP4/HDL)
 - Confondere il bias E2M1 (=1) con quello FP16 (=15) o E8M0 (=127).
 - Dimenticare il subnormale 0b0001 = 0.5: se lo si tratta come 0 tutti i
@@ -184,14 +162,39 @@ COMMON_PITFALLS = r"""
 - Scrivere `-3.S(5.W)` credendo sia un letterale negativo: Scala lo legge come
   `-(3.S(5.W))`, cioè l'operatore hardware `unary_-`, che allarga a 6 bit.
   La forma corretta e a larghezza fissa è `(-3).S(5.W)`.
-"""
 
 
-def full_context(target: str = "chisel") -> str:
-    """Blocco di conoscenza completo da iniettare nei prompt."""
-    if target == "chisel":
-        hdl, tb_ports = CHISEL_RULES, CHISEL_TB_PORTS
-    else:
-        hdl, tb_ports = VERILOG_RULES, ""
-    parts = [MXFP4_SPEC, hdl, VERILATOR_TB_RULES, tb_ports, COMMON_PITFALLS]
-    return "\n".join(p for p in parts if p)
+### RICHIESTA ORIGINALE DELL'UTENTE
+Unità di dot-product MXFP4 combinatoria su blocchi da 32 elementi, con accumulo intero esatto e uscita dell'esponente condiviso.
+
+### PIANO APPROVATO (da implementare alla lettera)
+Modulo        : MXFP4DotProduct
+Meta-HDL      : chisel
+Clocking      : combinational (latenza 0 cicli)
+Block size K  : 32
+Motivazione   : Chisel permette di parametrizzare K e di generare l'albero di somma con reduceTree; il datapath e' interamente intero quindi non serve libreria FP.
+
+Porte:
+  - in  a          UInt(128 bit) : blocco A, elemento i nei bit [4i+3:4i]
+  - in  b          UInt(128 bit) : blocco B
+  - in  scaleA     UInt(8 bit) : scala E8M0 di A
+  - in  scaleB     UInt(8 bit) : scala E8M0 di B
+  - out accQ2      SInt(32 bit) : accumulo intero in unita' 1/4
+  - out expOut     SInt(16 bit) : esponente risultante
+  - out isNaN      Bool(1 bit) : scala NaN
+
+Algoritmo:
+  1. Decodifica ogni nibble E2M1 in un intero con segno pari a mag*2 tramite LUT {0,1,2,3,4,6,8,12}.
+  2. Moltiplica gli interi a coppie: il prodotto e' esatto in unita' 1/4.
+  3. Somma con albero bilanciato usando +& per evitare overflow.
+  4. Calcola expOut = scaleA + scaleB - 254.
+  5. isNaN se una scala vale 0xFF.
+
+Numerica:
+  accumulatore : da dimensionare bit
+  arrotondamento: esatto, nessun arrotondamento
+  saturazione  : satura a +/-6 in E2M1
+  casi speciali: zero negativo, subnormale 0.5, scala NaN
+
+### ISTRUZIONI SPECIFICHE DEL PLANNER
+

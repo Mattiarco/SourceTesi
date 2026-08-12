@@ -1,0 +1,6 @@
+obj_dir/
+target/
+project/target/
+project/project/
+*.vcd
+.bsp/

@@ -1,0 +1,89 @@
+{
+  "ok": false,
+  "message": "Verifica non superata dopo 0 round di fix. Ultimo stato: - elaborate",
+  "module": "MXFP4DotProduct",
+  "meta_hdl": "chisel",
+  "request": "Unità di dot-product MXFP4 combinatoria su blocchi da 32 elementi, con accumulo intero esatto e uscita dell'esponente condiviso.",
+  "config": {
+    "request": "Unità di dot-product MXFP4 combinatoria su blocchi da 32 elementi, con accumulo intero esatto e uscita dell'esponente condiviso.",
+    "target": null,
+    "block_size": 32,
+    "provider": "mock",
+    "model": null,
+    "planner_model": null,
+    "coder_model": null,
+    "reviewer_model": null,
+    "tester_model": null,
+    "host": "http://localhost:11434",
+    "temperature": 0.2,
+    "max_tokens": null,
+    "timeout": 900,
+    "outdir": "outrel",
+    "max_fix_rounds": 0,
+    "static_review": false,
+    "few_shot": false,
+    "num_random_vectors": 64,
+    "seed": 1234,
+    "keep_going": true,
+    "verbose": false
+  },
+  "files": [
+    "src/main/scala/mxfp4/MXFP4DotProduct.scala",
+    "sim/tb_MXFP4DotProduct.cpp"
+  ],
+  "llm_stats": {
+    "planner": {
+      "model": "mock:mock-1",
+      "calls": 1,
+      "input_tokens": 633,
+      "output_tokens": 427,
+      "seconds": 6.4373016357421875e-06
+    },
+    "coder": {
+      "model": "mock:mock-1",
+      "calls": 1,
+      "input_tokens": 2881,
+      "output_tokens": 974,
+      "seconds": 9.5367431640625e-06
+    },
+    "reviewer": {
+      "model": "mock:mock-1",
+      "calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.0
+    },
+    "tester": {
+      "model": "mock:mock-1",
+      "calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.0
+    }
+  },
+  "trace": [
+    {
+      "t": 0.01,
+      "agent": "planner",
+      "event": "plan",
+      "module": "MXFP4DotProduct",
+      "hdl": "chisel"
+    },
+    {
+      "t": 0.04,
+      "agent": "coder",
+      "event": "files",
+      "paths": [
+        "src/main/scala/mxfp4/MXFP4DotProduct.scala",
+        "sim/tb_MXFP4DotProduct.cpp"
+      ]
+    },
+    {
+      "t": 0.23,
+      "agent": "tester",
+      "event": "toolchain",
+      "round": 0,
+      "summary": "- elaborate"
+    }
+  ]
+}

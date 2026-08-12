@@ -33,7 +33,9 @@ lazy val root = (project in file("."))
 ELABORATE_SCALA = """// GENERATO AUTOMATICAMENTE — non modificare.
 package mxfp4
 
-import circt.stage.ChiselStage
+// `_root_.` è necessario: dentro `package mxfp4` il nome `circt` verrebbe
+// risolto come `chisel3.util.circt` se il file importasse `chisel3.util._`.
+import _root_.circt.stage.ChiselStage
 
 object Elaborate extends App {{
   val outDir = sys.env.getOrElse("MXFP4_RTL_DIR", "rtl")
