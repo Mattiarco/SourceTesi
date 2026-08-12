@@ -65,6 +65,27 @@ def tool_report() -> dict[str, str | None]:
     return out
 
 
+def check_path_sanity(path: Path | str) -> list[str]:
+    """Problemi noti dei percorsi che mandano in crisi Verilator/sbt/make.
+
+    Non sono paranoie: un accento nel path (es. ``.../Università/...``) fa
+    sbagliare a Verilator il calcolo del VPATH relativo a ``obj_dir``, e make
+    fallisce con "No rule to make target 'sim/tb_X.cpp'".
+    """
+    p = str(Path(path).resolve())
+    problems: list[str] = []
+    non_ascii = sorted({c for c in p if ord(c) > 127})
+    if non_ascii:
+        problems.append(
+            f"il percorso contiene caratteri non ASCII ({' '.join(non_ascii)}): "
+            f"Verilator e make possono sbagliare i path relativi. "
+            f"Consiglio: sposta il progetto in una cartella senza accenti.")
+    if " " in p:
+        problems.append("il percorso contiene spazi: alcuni Makefile generati non li "
+                        "gestiscono correttamente.")
+    return problems
+
+
 def format_tool_report(rep: dict[str, str | None]) -> str:
     return "\n".join(f"  {'✔' if v else '✘'} {k:<10} {v or 'NON TROVATO'}"
                      for k, v in rep.items())

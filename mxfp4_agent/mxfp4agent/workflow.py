@@ -9,7 +9,7 @@ from pathlib import Path
 from .agents import CoderAgent, PlannerAgent, ReviewerAgent, TesterAgent
 from .config import Config
 from .llm import LLMError, build_provider
-from .toolchain import format_tool_report, tool_report
+from .toolchain import check_path_sanity, format_tool_report, tool_report
 from .utils import ExtractedFile, Log
 
 
@@ -54,6 +54,8 @@ class Workflow:
         self.log.stage("system", f"LLM: {detail}")
         rep = tool_report()
         self.log.info("toolchain:\n" + format_tool_report(rep))
+        for warn in check_path_sanity(self.cfg.outdir):
+            self.log.fail(f"ATTENZIONE sul percorso di output: {warn}")
         return ok, detail
 
     # ------------------------------------------------------------------- run

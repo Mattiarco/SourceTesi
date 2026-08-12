@@ -122,9 +122,11 @@ class ToolchainRunner:
         files = self.rtl_files()
         if not files:
             return StageResult("lint", False, "Nessun file RTL in rtl/.")
+        # path ASSOLUTI: Verilator non deve mai dover calcolare percorsi relativi
+        # (fallisce se la directory contiene caratteri non ASCII).
         r = run(["verilator", "--lint-only", "-Wall", "-Wno-DECLFILENAME",
                  "-Wno-UNUSEDSIGNAL", "--top-module", self.module,
-                 *[str(f.relative_to(self.root)) for f in files]],
+                 *[str(f) for f in files]],
                 cwd=self.root, timeout=self.verilator_timeout)
         return StageResult("lint", r.ok, r.log)
 
@@ -143,12 +145,15 @@ class ToolchainRunner:
             return StageResult("build", False, "Nessun file RTL da compilare.")
         # UNUSEDSIGNAL: un Module Chisel espone sempre clock/reset, inutilizzati
         # nei design combinatori. Il warning è atteso, non va segnalato al Fixer.
+        # Tutto ASSOLUTO, --Mdir compreso. Con path relativi Verilator deve
+        # calcolare il prefisso "../" del VPATH rispetto a obj_dir, e su
+        # directory con caratteri non ASCII (es. "Università") sbaglia: emette
+        # "sim/tb_X.cpp" invece di "../sim/tb_X.cpp" e make non trova il file.
         cmd = ["verilator", "--cc", "--exe", "--build", "-Wall", "-Wno-fatal",
                "-Wno-DECLFILENAME", "-Wno-UNUSEDSIGNAL", "--top-module", self.module,
-               "--Mdir", "obj_dir", "-o", f"sim_{self.module}",
-               "-CFLAGS", f"-I{self.sim_dir.resolve()} -O2",
-               *[str(f.relative_to(self.root)) for f in files],
-               str(tb.relative_to(self.root))]
+               "--Mdir", str(self.obj_dir), "-o", f"sim_{self.module}",
+               "-CFLAGS", f"-I{self.sim_dir} -O2",
+               *[str(f) for f in files], str(tb)]
         r = run(cmd, cwd=self.root, timeout=self.verilator_timeout)
         exe = self.obj_dir / f"sim_{self.module}"
         ok = r.ok and exe.exists()

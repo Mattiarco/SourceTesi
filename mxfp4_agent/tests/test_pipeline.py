@@ -247,19 +247,52 @@ def test_runner_root_is_absolute_and_paths_are_relative(tmp_path):
     (proj / "rtl").mkdir(parents=True)
     (proj / "rtl" / "MyMod.sv").write_text("module MyMod(); endmodule\n")
 
+    (proj / "sim").mkdir()
+    (proj / "sim" / "tb_MyMod.cpp").write_text("int main(){}\n")
+
+    from mxfp4agent.toolchain import runner as R
+
+    captured: list[list[str]] = []
+    orig_run, orig_which = R.run, R.which
+    R.run = lambda cmd, cwd=None, timeout=900, env=None: (
+        captured.append(cmd) or R.CmdResult(cmd, 0, "", ""))
+    R.which = lambda n: "/usr/bin/" + n
+
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         r = ToolchainRunner("out/MyMod", "MyMod")          # path RELATIVO
         assert r.root.is_absolute()
-        files = r.rtl_files()
-        assert len(files) == 1
-        # i comandi girano con cwd=root: il path passato dev'essere relativo a root
-        rel = files[0].relative_to(r.root)
-        assert str(rel) == os.path.join("rtl", "MyMod.sv")
-        assert not str(rel).startswith("out")
+        assert len(r.rtl_files()) == 1
+        r.lint()
+        r.build()
     finally:
         os.chdir(cwd)
+        R.run, R.which = orig_run, orig_which
+
+    assert captured, "nessun comando eseguito"
+    for cmd in captured:
+        for arg in cmd:
+            # nessun path relativo: né "out/..." (che verrebbe risolto due volte
+            # rispetto a cwd=root) né "sim/..." (che rompe il VPATH di obj_dir)
+            assert not arg.startswith(("out/", "rtl/", "sim/")), f"path relativo: {arg} in {cmd}"
+    build_cmd = captured[-1]
+    assert str(proj / "sim" / "tb_MyMod.cpp") in build_cmd
+    assert str(proj / "obj_dir") in build_cmd          # anche --Mdir assoluto
+
+
+def test_non_ascii_path_is_flagged(tmp_path):
+    """`.../Università/...` rompe il calcolo del VPATH di Verilator."""
+    from mxfp4agent.toolchain import check_path_sanity
+
+    accented = tmp_path / "Università" / "out"
+    accented.mkdir(parents=True)
+    warns = check_path_sanity(accented)
+    assert warns and "non ASCII" in warns[0] and "à" in warns[0]
+
+    clean = tmp_path / "Universita" / "out"
+    clean.mkdir(parents=True)
+    assert not any("non ASCII" in w for w in check_path_sanity(clean))
 
 
 def test_repeated_identical_failure_is_detected():
