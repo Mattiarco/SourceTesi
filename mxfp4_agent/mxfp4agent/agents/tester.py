@@ -54,9 +54,17 @@ class TesterAgent(Agent):
         return n
 
     # -------------------------------------------------------------- toolchain
-    def run_toolchain(self, plan: dict) -> ToolchainReport:
+    def run_toolchain(self, plan: dict, round_id: int = 0) -> ToolchainReport:
         runner = ToolchainRunner(self.workdir, plan["module_name"], plan["meta_hdl"])
         rep = runner.run_all()
+
+        # i log delle fasi vanno sempre su disco: senza, l'errore di build si
+        # perde e resta solo un "✘ build fallito" inutilizzabile.
+        logdir = self.workdir / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        for s in rep.stages:
+            (logdir / f"r{round_id}_{s.stage}.log").write_text(s.log, encoding="utf-8")
+
         for s in rep.stages:
             if s.skipped and not s.ok:
                 self.log.fail(f"{s.stage}: saltato — {s.log.splitlines()[0]}")
@@ -65,7 +73,9 @@ class TesterAgent(Agent):
             elif s.ok:
                 self.log.ok(f"{s.stage} ok")
             else:
-                self.log.fail(f"{s.stage} fallito")
+                self.log.fail(f"{s.stage} fallito → logs/r{round_id}_{s.stage}.log")
+                self.log.block(f"{s.stage} (ultime righe)", "\n".join(
+                    s.log.splitlines()[-25:]), 2500)
         return rep
 
     # -------------------------------------------------------------- diagnosi
@@ -88,9 +98,9 @@ Produci la diagnosi nel formato richiesto."""
 
     # ------------------------------------------------------- run + diagnose
     def run(self, plan: dict, files: list[ExtractedFile], num_random: int = 64,
-            seed: int = 1234, diagnose: bool = True) -> AgentResult:
+            seed: int = 1234, diagnose: bool = True, round_id: int = 0) -> AgentResult:
         self.materialize(plan, files, num_random, seed)
-        report = self.run_toolchain(plan)
+        report = self.run_toolchain(plan, round_id)
         if report.blocked:
             return AgentResult(False, report, "",
                                "Toolchain incompleta: file generati ma non verificati.",

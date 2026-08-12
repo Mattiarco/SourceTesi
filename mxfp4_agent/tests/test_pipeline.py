@@ -155,6 +155,51 @@ def test_anthropic_other_errors_are_not_swallowed():
         raise AssertionError("l'errore doveva propagarsi")
 
 
+def test_anthropic_empty_thinking_response_gives_actionable_error():
+    """Il caso reale: extended thinking consuma max_tokens, zero blocchi di testo."""
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError
+
+    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test", max_tokens=8192)
+    err = prov._empty_response_error([{"type": "thinking", "thinking": ""}], "max_tokens", 8192)
+    assert isinstance(err, LLMError)
+    msg = str(err)
+    assert "extended thinking" in msg and "--max-tokens" in msg and "8192" in msg
+
+
+def test_claude_default_budget_is_large_enough_for_thinking():
+    from mxfp4agent.llm import DEFAULT_MAX_TOKENS, build_provider
+
+    assert DEFAULT_MAX_TOKENS["claude"] >= 32000
+    assert build_provider("claude", api_key="x").max_tokens == DEFAULT_MAX_TOKENS["claude"]
+    assert build_provider("ollama").max_tokens == DEFAULT_MAX_TOKENS["ollama"]
+    # un valore esplicito ha sempre la precedenza
+    assert build_provider("claude", api_key="x", max_tokens=1234).max_tokens == 1234
+
+
+def test_truncated_response_is_flagged(capsys=None):
+    """Se la risposta è tagliata a metà l'agente deve dirlo, non proseguire in silenzio."""
+    from mxfp4agent.agents.base import Agent
+    from mxfp4agent.llm.base import LLMProvider, LLMResponse
+
+    class Trunc(LLMProvider):
+        name = "trunc"
+
+        def _chat(self, system, messages, **kw):
+            return LLMResponse("meta file", self.model, self.name, 10, 99,
+                               stop_reason="max_tokens")
+
+        def health_check(self, live=True):
+            return True, "ok"
+
+    warnings = []
+    log = Log(verbose=False, color=False)
+    log.fail = warnings.append
+    agent = Agent(Trunc("m", max_tokens=8192), log)
+    agent.ask("dammi un file")
+    assert warnings and "TRONCATA" in warnings[0]
+
+
 def test_anthropic_health_check_reports_401():
     from mxfp4agent.llm.anthropic_provider import AnthropicProvider
     from mxfp4agent.llm.base import LLMError
@@ -168,10 +213,32 @@ def test_anthropic_health_check_reports_401():
 
 # -------------------------------------------------------------- end-to-end
 def test_end_to_end_mock_materializes_project(tmp_path):
-    cfg = Config(request="dot product mxfp4 combinatorio", provider="mock",
-                 outdir=tmp_path, max_fix_rounds=0, static_review=False,
-                 num_random_vectors=8, keep_going=True, verbose=False)
-    result = Workflow(cfg).run()
+    """Verifica lo scaffolding, NON la toolchain esterna.
+
+    sbt/verilator sono volutamente esclusi: il test deve dare lo stesso esito su
+    qualunque macchina, e un giro completo di sbt richiederebbe minuti.
+    """
+    from mxfp4agent.agents.tester import TesterAgent
+    from mxfp4agent.toolchain.runner import StageResult, ToolchainReport
+
+    def fake_toolchain(self, plan, round_id=0):
+        rep = ToolchainReport()
+        for st in ("elaborate", "lint", "build", "simulate"):
+            rep.add(StageResult(st, True, "(toolchain simulata nel test)",
+                                detail={"passed": 8}))
+        return rep
+
+    original = TesterAgent.run_toolchain
+    TesterAgent.run_toolchain = fake_toolchain
+    try:
+        cfg = Config(request="dot product mxfp4 combinatorio", provider="mock",
+                     outdir=tmp_path, max_fix_rounds=0, static_review=False,
+                     num_random_vectors=8, keep_going=True, verbose=False)
+        result = Workflow(cfg).run()
+    finally:
+        TesterAgent.run_toolchain = original
+
+    assert result.ok, result.message
     root = tmp_path / "MXFP4DotProduct"
     assert root.exists()
     for rel in ("build.sbt", "Makefile", "project/build.properties",

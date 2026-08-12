@@ -43,6 +43,10 @@ class Agent:
             self.history.append(Message("assistant", resp.text))
             self._trim_history()
         self.log.info(f"{self.name}: {resp.output_tokens} tok out in {resp.latency_s:.1f}s")
+        if resp.stop_reason == "max_tokens":
+            # risposta tagliata a metà: quasi certamente un file HDL incompleto
+            self.log.fail(f"{self.name}: risposta TRONCATA a {resp.output_tokens} token. "
+                          f"Rilancia con --max-tokens più alto (attuale: {self.provider.max_tokens}).")
         return resp.text
 
     def _trim_history(self, max_turns: int = 6) -> None:

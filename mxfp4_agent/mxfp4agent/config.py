@@ -23,7 +23,7 @@ class Config:
     host: str = "http://localhost:11434"
     api_key: str | None = None
     temperature: float = 0.2
-    max_tokens: int = 8192
+    max_tokens: int | None = None    # None = default del provider (vedi DEFAULT_MAX_TOKENS)
     timeout: int = 900
 
     # --- workflow

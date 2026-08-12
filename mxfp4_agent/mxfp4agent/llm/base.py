@@ -29,6 +29,7 @@ class LLMResponse:
     output_tokens: int = 0
     latency_s: float = 0.0
     raw: Any = None
+    stop_reason: str = ""
 
     @property
     def total_tokens(self) -> int:

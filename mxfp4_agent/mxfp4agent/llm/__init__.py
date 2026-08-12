@@ -11,10 +11,22 @@ DEFAULT_MODELS = {
     "mock": "mock-1",
 }
 
+#: budget di output per provider. I modelli Claude recenti usano l'extended
+#: thinking, che consuma `max_tokens`: con 8k si esaurisce il budget ragionando
+#: e la risposta arriva senza alcun blocco di testo.
+DEFAULT_MAX_TOKENS = {
+    "ollama": 8192,
+    "claude": 32000,
+    "anthropic": 32000,
+    "mock": 4096,
+}
+
 
 def build_provider(kind: str, model: str | None = None, **kw: Any) -> LLMProvider:
     kind = (kind or "ollama").lower()
     model = model or DEFAULT_MODELS.get(kind)
+    if kw.get("max_tokens") is None:
+        kw["max_tokens"] = DEFAULT_MAX_TOKENS.get(kind, 8192)
     if kind == "ollama":
         from .ollama_provider import OllamaProvider
 
@@ -30,4 +42,5 @@ def build_provider(kind: str, model: str | None = None, **kw: Any) -> LLMProvide
     raise ValueError(f"Provider sconosciuto: {kind!r} (usa ollama | claude | mock)")
 
 
-__all__ = ["build_provider", "LLMProvider", "LLMResponse", "Message", "LLMError", "DEFAULT_MODELS"]
+__all__ = ["build_provider", "LLMProvider", "LLMResponse", "Message", "LLMError",
+           "DEFAULT_MODELS", "DEFAULT_MAX_TOKENS"]

@@ -130,7 +130,7 @@ class Workflow:
         last_report = None
         for rnd in range(cfg.max_fix_rounds + 1):
             self.log.stage("tester", f"round {rnd}: scrittura progetto ed esecuzione toolchain…")
-            tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed)
+            tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed, round_id=rnd)
             last_report = tres.payload
             self._t("tester", "toolchain", round=rnd,
                     summary=last_report.summary() if last_report else "")

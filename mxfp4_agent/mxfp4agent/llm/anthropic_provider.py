@@ -59,17 +59,41 @@ class AnthropicProvider(LLMProvider):
                 return self._call(body)
             raise
 
+    # --------------------------------------------------------- diagnostica
+    def _empty_response_error(self, blocks: list, stop_reason: str, budget: int) -> LLMError:
+        """Messaggio utile quando la risposta non contiene testo.
+
+        Il caso tipico: modelli con *extended thinking* che consumano l'intero
+        budget `max_tokens` ragionando, senza mai arrivare al blocco di testo.
+        """
+        kinds = {b.get("type") if isinstance(b, dict) else getattr(b, "type", "?")
+                 for b in blocks}
+        if stop_reason == "max_tokens" or kinds == {"thinking"}:
+            return LLMError(
+                f"Il modello '{self.model}' ha esaurito il budget di {budget} token "
+                f"prima di produrre testo (stop_reason={stop_reason or 'n/d'}, "
+                f"blocchi={sorted(kinds) or 'nessuno'}).\n"
+                f"È un modello con extended thinking: il ragionamento consuma "
+                f"max_tokens.\nSoluzione: rilancia con `--max-tokens 32000` "
+                f"(o superiore).")
+        return LLMError(f"Risposta senza testo da Claude "
+                        f"(stop_reason={stop_reason or 'n/d'}, blocchi={sorted(kinds)}).")
+
     # ------------------------------------------------------------- trasporto
     def _call(self, body: dict[str, Any]) -> LLMResponse:
         model = body["model"]
+        budget = body.get("max_tokens", 0)
         if self._sdk is not None:
             try:
                 r = self._sdk.messages.create(**body)
             except Exception as e:  # pragma: no cover - network
                 raise LLMError(f"Anthropic SDK error: {e}") from e
             text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+            stop = getattr(r, "stop_reason", "") or ""
+            if not text.strip():
+                raise self._empty_response_error(list(r.content), stop, budget)
             return LLMResponse(text, model, self.name, r.usage.input_tokens,
-                               r.usage.output_tokens, raw=r)
+                               r.usage.output_tokens, raw=r, stop_reason=stop)
 
         req = urllib.request.Request(
             API_URL,
@@ -89,12 +113,14 @@ class AnthropicProvider(LLMProvider):
         except urllib.error.URLError as e:  # pragma: no cover - network
             raise LLMError(f"Rete non disponibile per l'API Anthropic: {e.reason}") from e
 
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        blocks = data.get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         usage = data.get("usage", {})
-        if not text:
-            raise LLMError(f"Risposta vuota da Claude: {str(data)[:300]}")
+        stop = data.get("stop_reason", "") or ""
+        if not text.strip():
+            raise self._empty_response_error(blocks, stop, budget)
         return LLMResponse(text, model, self.name, usage.get("input_tokens", 0),
-                           usage.get("output_tokens", 0), raw=data)
+                           usage.get("output_tokens", 0), raw=data, stop_reason=stop)
 
     # ---------------------------------------------------------------- health
     def health_check(self, live: bool = True) -> tuple[bool, str]:

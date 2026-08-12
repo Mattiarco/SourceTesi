@@ -46,7 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
     g.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
     g.add_argument("--temperature", type=float, default=0.2)
-    g.add_argument("--max-tokens", type=int, default=8192)
+    g.add_argument("--max-tokens", type=int, default=None,
+                   help="budget di output; default per provider (claude: 32000, "
+                        "perché l'extended thinking consuma max_tokens)")
     g.add_argument("--timeout", type=int, default=900)
 
     d = p.add_argument_group("design")
