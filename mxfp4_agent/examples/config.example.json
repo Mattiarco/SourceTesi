@@ -1,0 +1,21 @@
+{
+  "request": "Unità MAC MXFP4 pipelined a 2 stadi: due blocchi da 32 elementi E2M1 con scala E8M0, accumulo intero esatto, uscita convertita in FP32 e segnale di valid.",
+  "target": "chisel",
+  "block_size": 32,
+
+  "provider": "claude",
+  "model": "claude-sonnet-5",
+  "planner_model": "claude-opus-5",
+  "temperature": 0.15,
+  "max_tokens": 12000,
+  "timeout": 900,
+
+  "outdir": "out",
+  "max_fix_rounds": 5,
+  "static_review": true,
+  "few_shot": false,
+  "num_random_vectors": 128,
+  "seed": 1234,
+  "keep_going": false,
+  "verbose": true
+}

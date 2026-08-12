@@ -1,0 +1,5 @@
+# Il core non ha dipendenze obbligatorie: Ollama e Anthropic sono raggiunti via urllib.
+# Questi pacchetti sono opzionali ma consigliati.
+
+anthropic>=0.40.0    # SDK ufficiale Claude (fallback automatico su urllib se assente)
+pytest>=7.0          # suite di test (esiste anche run_tests.py senza dipendenze)
