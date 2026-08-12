@@ -100,6 +100,40 @@ VERILOG_RULES = r"""
 6. Larghezze esplicite ovunque; niente conversioni implicite firmate/non firmate.
 """
 
+CHISEL_TB_PORTS = r"""
+### NOMI DELLE PORTE NEL TESTBENCH (Chisel) — CAUSA DI ERRORE PIU' FREQUENTE
+
+Chisel **appiattisce il Bundle `io`** quando emette SystemVerilog: ogni campo
+`io.<nome>` diventa una porta di primo livello chiamata `io_<nome>`.
+Nel testbench Verilator devi quindi scrivere `dut->io_<nome>`, MAI `dut-><nome>`.
+
+    class Foo extends Module {                 // Chisel
+      val io = IO(new Bundle {
+        val a      = Input(UInt(128.W))
+        val scaleA = Input(UInt(8.W))
+        val accQ2  = Output(SInt(32.W))
+      })
+    }
+
+    dut->io_a[0] = ...;      // C++  ✅
+    dut->io_scaleA = ...;    //      ✅
+    dut->io_accQ2;           //      ✅
+    dut->a[0] = ...;         //      ❌ "class VFoo has no member named 'a'"
+
+Inoltre un `Module` Chisel espone **SEMPRE** le porte `clock` e `reset`, anche
+se il design e' puramente combinatorio: si chiamano cosi', senza prefisso.
+Nel testbench di un modulo combinatorio mettili a 0 una volta sola:
+
+    dut->clock = 0;
+    dut->reset = 0;
+
+(Per un design puramente combinatorio Verilator emette un warning UNUSEDSIGNAL
+su clock/reset: e' atteso e innocuo.)
+
+Se invece il target e' SystemVerilog scritto a mano, le porte hanno esattamente
+il nome che hai dato tu, senza alcun prefisso.
+"""
+
 VERILATOR_TB_RULES = r"""
 ### REGOLE TESTBENCH C++ PER VERILATOR — vincolanti
 1. File singolo `tb_<Nome>.cpp` con:
@@ -142,10 +176,16 @@ COMMON_PITFALLS = r"""
 - In Chisel, `+` tronca alla larghezza massima degli operandi: usa `+&`.
 - Nel testbench, leggere un output combinatorio senza `eval()` dopo aver
   scritto gli input.
+- Usare `dut->nome` invece di `dut->io_nome` con moduli Chisel: errore di
+  compilazione "class V<Modulo> has no member named ...".
 """
 
 
 def full_context(target: str = "chisel") -> str:
     """Blocco di conoscenza completo da iniettare nei prompt."""
-    hdl = CHISEL_RULES if target == "chisel" else VERILOG_RULES
-    return "\n".join([MXFP4_SPEC, hdl, VERILATOR_TB_RULES, COMMON_PITFALLS])
+    if target == "chisel":
+        hdl, tb_ports = CHISEL_RULES, CHISEL_TB_PORTS
+    else:
+        hdl, tb_ports = VERILOG_RULES, ""
+    parts = [MXFP4_SPEC, hdl, VERILATOR_TB_RULES, tb_ports, COMMON_PITFALLS]
+    return "\n".join(p for p in parts if p)

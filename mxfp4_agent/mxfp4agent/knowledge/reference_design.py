@@ -61,6 +61,10 @@ class MXFP4DotProduct(val k: Int = 32) extends Module {
 '''
 
 REFERENCE_TB = r'''// Testbench Verilator per MXFP4DotProduct.
+//
+// NOTA: Chisel appiattisce il Bundle `io`, quindi le porte si chiamano
+// `io_<nome>` e non `<nome>`. Il modulo espone sempre anche clock/reset,
+// inutilizzati perche' il design e' combinatorio.
 #include "VMXFP4DotProduct.h"
 #include "verilated.h"
 #include "test_vectors.h"
@@ -73,22 +77,25 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     VMXFP4DotProduct* dut = new VMXFP4DotProduct;
 
+    dut->clock = 0;   // design combinatorio: clock/reset esistono ma non servono
+    dut->reset = 0;
+
     int failures = 0;
     const int n = NUM_VECTORS;
 
     for (int i = 0; i < n; ++i) {
         const mxfp4_vec_t& v = MXFP4_VECTORS[i];
-        for (int w = 0; w < 4; ++w) {
-            dut->a[w] = v.a[w];
-            dut->b[w] = v.b[w];
+        for (int w = 0; w < MXFP4_WORDS; ++w) {
+            dut->io_a[w] = v.a[w];
+            dut->io_b[w] = v.b[w];
         }
-        dut->scaleA = v.scale_a;
-        dut->scaleB = v.scale_b;
+        dut->io_scaleA = v.scale_a;
+        dut->io_scaleB = v.scale_b;
         dut->eval();
 
-        int32_t got_acc = (int32_t)dut->accQ2;
-        int16_t got_exp = (int16_t)dut->expOut;
-        uint8_t got_nan = (uint8_t)dut->isNaN;
+        int32_t got_acc = (int32_t)dut->io_accQ2;
+        int16_t got_exp = (int16_t)dut->io_expOut;
+        uint8_t got_nan = (uint8_t)dut->io_isNaN;
 
         if (got_acc != v.exp_acc_q2 || got_exp != v.exp_shared || got_nan != v.nan) {
             if (failures < 10) {

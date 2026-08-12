@@ -138,8 +138,10 @@ class ToolchainRunner:
         files = self.rtl_files()
         if not files:
             return StageResult("build", False, "Nessun file RTL da compilare.")
+        # UNUSEDSIGNAL: un Module Chisel espone sempre clock/reset, inutilizzati
+        # nei design combinatori. Il warning è atteso, non va segnalato al Fixer.
         cmd = ["verilator", "--cc", "--exe", "--build", "-Wall", "-Wno-fatal",
-               "-Wno-DECLFILENAME", "--top-module", self.module,
+               "-Wno-DECLFILENAME", "-Wno-UNUSEDSIGNAL", "--top-module", self.module,
                "--Mdir", "obj_dir", "-o", f"sim_{self.module}",
                "-CFLAGS", f"-I{self.sim_dir.resolve()} -O2",
                *[str(f.relative_to(self.root)) for f in files],

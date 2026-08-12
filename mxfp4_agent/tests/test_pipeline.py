@@ -67,6 +67,31 @@ def test_header_all_zero_vector_has_zero_accumulator():
     assert ", 0, " in first
 
 
+# ------------------------------------------------- convenzione porte Chisel
+def test_chisel_port_prefix_rule_is_in_the_prompt():
+    """Chisel appiattisce `io` in `io_<nome>`: senza questa regola il tb non compila."""
+    from mxfp4agent.knowledge import full_context
+
+    chisel = full_context("chisel")
+    assert "io_" in chisel and "appiattisce" in chisel
+    assert "clock" in chisel and "reset" in chisel
+    # per SystemVerilog scritto a mano la regola NON deve comparire: confonderebbe
+    assert "appiattisce" not in full_context("systemverilog")
+
+
+def test_reference_testbench_uses_io_prefix():
+    """Guardia di regressione sull'errore reale visto con Verilator 5.032."""
+    from mxfp4agent.knowledge.reference_design import REFERENCE_TB
+
+    for port in ("io_a", "io_b", "io_scaleA", "io_scaleB",
+                 "io_accQ2", "io_expOut", "io_isNaN"):
+        assert f"dut->{port}" in REFERENCE_TB, port
+    for wrong in ("dut->a[", "dut->b[", "dut->scaleA", "dut->accQ2", "dut->isNaN"):
+        assert wrong not in REFERENCE_TB, wrong
+    # clock e reset esistono sempre e NON hanno prefisso
+    assert "dut->clock" in REFERENCE_TB and "dut->reset" in REFERENCE_TB
+
+
 # ----------------------------------------------------------------- agents
 def test_planner_parses_mock_plan():
     log = Log(verbose=False, color=False)
