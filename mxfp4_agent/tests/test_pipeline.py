@@ -390,6 +390,62 @@ def test_non_ascii_path_is_flagged(tmp_path):
     assert not any("non ASCII" in w for w in check_path_sanity(clean))
 
 
+def test_fix_prompt_does_not_grow_with_history():
+    """La cronologia illimitata faceva troncare il prompt e sparire la spec MXFP4."""
+    from mxfp4agent.agents.reviewer import ReviewerAgent
+    from mxfp4agent.utils import ExtractedFile
+
+    rev = ReviewerAgent(build_provider("mock"), Log(False, False))
+    plan = PlannerAgent(build_provider("mock"), Log(False, False)).run("dot").payload
+    files = [ExtractedFile("src/main/scala/mxfp4/M.scala", "class M extends Module {}\n")]
+
+    sizes = []
+    for i in range(4):
+        rev.fix(plan, files, "elaborate", "errore " * 50, attempt=i + 1,
+                previous_attempts=[f"causa {j}" for j in range(i)])
+        sizes.append(len(rev.history))
+    assert sizes == [0, 0, 0, 0], f"la cronologia cresce: {sizes}"
+
+
+def test_fix_prompt_warns_against_repeating_a_failed_diagnosis():
+    from mxfp4agent.agents.reviewer import ReviewerAgent
+    from mxfp4agent.utils import ExtractedFile
+
+    captured = {}
+
+    class Spy(ReviewerAgent):
+        def ask(self, prompt, keep_history=True, **kw):
+            captured["p"] = prompt
+            return "CAUSA: x\n### FILE: a.scala\n```scala\nclass A\n```"
+
+    rev = Spy(build_provider("mock"), Log(False, False))
+    plan = PlannerAgent(build_provider("mock"), Log(False, False)).run("dot").payload
+    rev.fix(plan, [ExtractedFile("a.scala", "x")], "elaborate", "boom",
+            previous_attempts=["convertire accQ2 a UInt", "convertire expCombined"])
+    p = captured["p"]
+    assert "TENTATIVI GIA' FALLITI" in p
+    assert "convertire accQ2 a UInt" in p
+    assert "e' SBAGLIATA" in p
+
+
+def test_chisel_shift_rule_is_documented():
+    """Il 14B ha bruciato 4 round su `SInt >> SInt`."""
+    from mxfp4agent.knowledge import full_context
+
+    ctx = full_context("chisel")
+    assert "MAI `SInt`" in ctx
+    assert "cannot be applied to (chisel3.SInt)" in ctx
+    assert "Mux(sh < 0.S" in ctx
+
+
+def test_ollama_output_budget_leaves_room_for_the_prompt():
+    from mxfp4agent.llm import DEFAULT_MAX_TOKENS, build_provider
+
+    p = build_provider("ollama")
+    assert DEFAULT_MAX_TOKENS["ollama"] <= 4096
+    assert p.num_ctx - p.max_tokens >= 24000, "finestra utile troppo stretta per i prompt"
+
+
 def test_repeated_identical_failure_is_detected():
     """Quattro round identici sono un bug della toolchain, non del design."""
     from mxfp4agent.toolchain.runner import StageResult

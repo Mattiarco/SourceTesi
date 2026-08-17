@@ -142,9 +142,19 @@ class Workflow:
         # --------------------------------------- TESTER + LOOP DI RIPARAZIONE
         last_report = None
         prev_signature: str | None = None
+        causes: list[str] = []
         for rnd in range(cfg.max_fix_rounds + 1):
             self.log.stage("tester", f"round {rnd}: scrittura progetto ed esecuzione toolchain…")
-            tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed, round_id=rnd)
+            try:
+                tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed, round_id=rnd)
+            except LLMError as e:
+                msg = (f"Il provider LLM è caduto durante il round {rnd}: {e}\n"
+                       f"I file generati sono salvati; riprendi con "
+                       f"`--resume {workdir}` quando il servizio torna disponibile.")
+                self.log.fail(msg)
+                self._finalize(workdir, plan, files, False, msg)
+                return RunResult(False, plan, files, workdir, rnd, msg,
+                                 self.trace, self._stats())
             last_report = tres.payload
             self._t("tester", "toolchain", round=rnd,
                     summary=last_report.summary() if last_report else "")
@@ -194,13 +204,21 @@ class Workflow:
                 self.log.block("diagnosi del tester", tres.notes, 1200)
             try:
                 fres = reviewer.fix(plan, files, fail.stage,
-                                    f"{tres.notes}\n\n{fail.log}", issues, rnd + 1)
+                                    f"{tres.notes}\n\n{fail.log}", issues, rnd + 1,
+                                    previous_attempts=causes)
             except LLMError as e:
-                return RunResult(False, plan, files, workdir, rnd, str(e), self.trace)
+                msg = (f"Il provider LLM è caduto durante il fix del round {rnd + 1}: {e}\n"
+                       f"Riprendi con `--resume {workdir}`.")
+                self.log.fail(msg)
+                self._finalize(workdir, plan, files, False, msg)
+                return RunResult(False, plan, files, workdir, rnd, msg,
+                                 self.trace, self._stats())
             if not fres.ok:
                 self.log.fail("il fixer non ha prodotto correzioni; interrompo.")
                 break
             files = fres.payload
+            if fres.notes:
+                causes.append(fres.notes)
             self.log.ok(fres.notes or "patch applicata")
             self._t("reviewer", "fix", round=rnd + 1, cause=fres.notes)
 

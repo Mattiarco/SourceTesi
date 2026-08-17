@@ -14,8 +14,12 @@ DEFAULT_MODELS = {
 #: budget di output per provider. I modelli Claude recenti usano l'extended
 #: thinking, che consuma `max_tokens`: con 8k si esaurisce il budget ragionando
 #: e la risposta arriva senza alcun blocco di testo.
+#: Nota per Ollama: max_tokens è sottratto da num_ctx per calcolare lo spazio
+#: disponibile al prompt. Un budget di output generoso restringe la finestra e
+#: fa troncare il prompt (perdendo la specifica MXFP4). 4096 basta ampiamente
+#: per due file HDL.
 DEFAULT_MAX_TOKENS = {
-    "ollama": 8192,
+    "ollama": 4096,
     "claude": 32000,
     "anthropic": 32000,
     "mock": 4096,

@@ -69,6 +69,19 @@ CHISEL_RULES = r"""
 5. Firma corretta in Chisel 6: `MuxLookup(key, default)(Seq(k -> v, ...))`.
    `Cat` concatena con il PRIMO argomento nei bit più significativi.
 6. Slicing: `x(hi, lo)` è inclusivo su entrambi gli estremi.
+6-bis. **Gli shift: l'ammontare deve essere `UInt` o `Int` Scala, MAI `SInt`.**
+   `accQ2 >> expCombined` con `expCombined: SInt` NON compila
+   ("overloaded method >> ... cannot be applied to (chisel3.SInt)").
+   E convertire con `.asUInt` è peggio: un esponente negativo diventerebbe un
+   numero enorme. Un esponente CON SEGNO si applica scegliendo la direzione:
+
+     val sh    = expCombined                       // SInt
+     val amt   = Mux(sh < 0.S, (-sh).asUInt, sh.asUInt)
+     val res   = Mux(sh < 0.S, (acc >> amt).asSInt, (acc << amt).asSInt)
+
+   In generale, per MXFP4 conviene NON applicare affatto lo shift: esporre
+   l'accumulatore intero e l'esponente separatamente è più semplice, esatto e
+   privo di overflow. Applica lo shift solo se la specifica lo richiede.
 7. Registri: `RegInit(0.U(8.W))`, `RegNext(x, 0.U)`. Reset sincrono di default.
 8. Somma di molti termini: usa `+&` (estende la larghezza, niente overflow
    silenzioso) dentro un albero bilanciato scritto a mano:
@@ -184,6 +197,8 @@ COMMON_PITFALLS = r"""
 - Scrivere `-3.S(5.W)` credendo sia un letterale negativo: Scala lo legge come
   `-(3.S(5.W))`, cioè l'operatore hardware `unary_-`, che allarga a 6 bit.
   La forma corretta e a larghezza fissa è `(-3).S(5.W)`.
+- Usare un `SInt` come ammontare di shift (vedi regola 6-bis): non compila, e
+  il "rimedio" `.asUInt` trasforma un esponente negativo in uno enorme.
 """
 
 

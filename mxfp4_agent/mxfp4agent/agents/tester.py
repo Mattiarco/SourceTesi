@@ -109,5 +109,12 @@ Produci la diagnosi nel formato richiesto."""
             sim = next(s for s in report.stages if s.stage == "simulate")
             return AgentResult(True, report, "",
                                f"{sim.detail.get('passed', '?')} vettori superati")
-        notes = self.diagnose(plan, report).notes if diagnose else ""
+        notes = ""
+        if diagnose:
+            try:
+                notes = self.diagnose(plan, report).notes
+            except Exception as e:
+                # La diagnosi è un aiuto per il Fixer, non un requisito: il log
+                # grezzo basta. Non deve far crollare il round.
+                self.log.fail(f"diagnosi saltata ({str(e)[:100]})")
         return AgentResult(False, report, "", notes)

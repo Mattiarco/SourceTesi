@@ -75,30 +75,44 @@ Emetti il JSON di review."""
 
     # ---------------------------------------------------------------- fix
     def fix(self, plan: dict, files: list[ExtractedFile], stage: str, log: str,
-            issues: list[dict] | None = None, attempt: int = 1) -> AgentResult:
+            issues: list[dict] | None = None, attempt: int = 1,
+            previous_attempts: list[str] | None = None) -> AgentResult:
         issue_txt = ""
         if issues:
             issue_txt = "\n### PROBLEMI SEGNALATI IN REVIEW\n" + "\n".join(
                 f"- [{i.get('severity','?')}] {i.get('file','')}: {i.get('problem','')} "
                 f"-> {i.get('fix','')}" for i in issues)
 
+        # Riassunto COMPATTO dei tentativi precedenti al posto della cronologia
+        # completa: quest'ultima cresce senza limite e, su modelli locali con
+        # finestra piccola, viene troncata dall'inizio facendo sparire proprio
+        # la specifica MXFP4 dal system prompt.
+        history_txt = ""
+        if previous_attempts:
+            history_txt = ("\n### TENTATIVI GIA' FALLITI (non riproporli)\n" +
+                           "\n".join(f"- tentativo {i + 1}: {truncate(c, 300)}"
+                                     for i, c in enumerate(previous_attempts)) +
+                           "\nSe la tua diagnosi coincide con una di queste, e' SBAGLIATA: "
+                           "l'errore e' identico dopo quelle correzioni. Cerca altrove.")
+
         prompt = f"""[FIX] Tentativo {attempt}. Fase fallita: **{stage}**.
 
 {full_context(plan['meta_hdl'])}
 
 {HEADER_CONTRACT}
-{issue_txt}
+{issue_txt}{history_txt}
 
 ### LOG DI ERRORE ({stage})
 ```
-{truncate(log, 7000)}
+{truncate(log, 5000)}
 ```
 
 ### CODICE ATTUALE
 {self._dump(files)}
 
 Diagnostica la causa e riemetti i file corretti per intero."""
-        text = self.ask(prompt)
+        # keep_history=False: il contesto necessario e' tutto nel prompt qui sopra.
+        text = self.ask(prompt, keep_history=False)
         new_files = extract_files(text)
         cause = self._cause(text)
         if not new_files:
@@ -127,7 +141,7 @@ Diagnostica la causa e riemetti i file corretti per intero."""
         return list(by_path.values())
 
     @staticmethod
-    def _dump(files: list[ExtractedFile], limit: int = 9000) -> str:
+    def _dump(files: list[ExtractedFile], limit: int = 6000) -> str:
         chunks = []
         for f in files:
             lang = {".scala": "scala", ".sv": "systemverilog", ".v": "verilog",
