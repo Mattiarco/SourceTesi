@@ -17,15 +17,22 @@ API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
 
+#: codici HTTP che vale la pena riprovare (sovraccarico, rate limit, guasti transitori)
+TRANSIENT_CODES = ("429", "500", "502", "503", "504", "529")
+
+
 class AnthropicProvider(LLMProvider):
     name = "claude"
+
+    #: memoria CONDIVISA fra istanze: ogni agente ha il proprio provider, ma la
+    #: scoperta "questo modello rifiuta temperature" va fatta una volta sola,
+    #: altrimenti si paga un 400 inutile per ciascuno dei quattro agenti.
+    _temperature_blocked: set[str] = set()
 
     def __init__(self, model: str = "claude-sonnet-5", api_key: str | None = None, **kw: Any) -> None:
         super().__init__(model, **kw)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._sdk = None
-        #: alcuni modelli recenti rifiutano `temperature`; lo disattiviamo al volo
-        self.send_temperature = True
         try:  # optional fast path
             import anthropic  # type: ignore
 
@@ -52,12 +59,36 @@ class AnthropicProvider(LLMProvider):
         try:
             return self._call(body)
         except LLMError as e:
-            # "`temperature` is deprecated for this model" -> riprova senza
+            low = str(e).lower()
+            if "credit balance" in low or "billing" in low:
+                raise LLMError(
+                    "Credito API Anthropic esaurito.\n"
+                    "  → Ricarica su console.anthropic.com → Plans & Billing.\n"
+                    "  → Attenzione: un abbonamento Claude Pro/Max NON include "
+                    "credito API, sono due cose separate.\n"
+                    "  → Alternativa gratuita: rilancia con `--provider ollama`."
+                ) from e
+            # "`temperature` is deprecated for this model" -> riprova senza,
+            # e ricordalo per tutti gli agenti, non solo per questa istanza.
             if "temperature" in str(e).lower() and "temperature" in body:
-                self.send_temperature = False
+                AnthropicProvider._temperature_blocked.add(model)
                 body.pop("temperature")
                 return self._call(body)
             raise
+
+    @property
+    def send_temperature(self) -> bool:
+        return self.model not in AnthropicProvider._temperature_blocked
+
+    # ------------------------------------------------------------ transienti
+    def is_transient(self, err: Exception) -> bool:
+        msg = str(err)
+        if "Anthropic HTTP" not in msg and "SDK error" not in msg:
+            return False
+        low = msg.lower()
+        if "overloaded" in low or "rate" in low or "timeout" in low:
+            return True
+        return any(f"HTTP {c}" in msg for c in TRANSIENT_CODES)
 
     # --------------------------------------------------------- diagnostica
     def _empty_response_error(self, blocks: list, stop_reason: str, budget: int) -> LLMError:
@@ -139,7 +170,9 @@ class AnthropicProvider(LLMProvider):
                 return False, "chiave rifiutata (401): rigenerala su console.anthropic.com"
             if "404" in msg or "not_found" in msg.lower():
                 return False, f"modello '{self.model}' inesistente per questa chiave"
+            if "credito api" in msg.lower() or "credit balance" in msg.lower():
+                return False, "credito API esaurito (ricarica su console.anthropic.com)"
             if "429" in msg:
-                return False, "rate limit / credito esaurito (429)"
+                return False, "rate limit (429): riprova fra poco"
             return False, f"chiamata fallita: {msg[:160]}"
         return True, f"Claude ok e raggiungibile (modello '{self.model}', {sdk})"

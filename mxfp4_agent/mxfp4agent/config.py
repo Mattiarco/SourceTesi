@@ -21,6 +21,7 @@ class Config:
     reviewer_model: str | None = None
     tester_model: str | None = None
     host: str = "http://localhost:11434"
+    num_ctx: int = 32768             # finestra di contesto Ollama
     api_key: str | None = None
     temperature: float = 0.2
     max_tokens: int | None = None    # None = default del provider (vedi DEFAULT_MAX_TOKENS)

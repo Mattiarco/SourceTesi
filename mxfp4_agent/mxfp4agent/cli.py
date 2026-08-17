@@ -44,6 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--reviewer-model")
     g.add_argument("--tester-model")
     g.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
+    g.add_argument("--num-ctx", type=int, default=32768,
+                   help="finestra di contesto Ollama (abbassala se il modello va in "
+                        "swap o esaurisce la VRAM)")
     g.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
     g.add_argument("--temperature", type=float, default=0.2)
     g.add_argument("--max-tokens", type=int, default=None,
@@ -148,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             reviewer_model=args.reviewer_model,
             tester_model=args.tester_model,
             host=args.host,
+            num_ctx=args.num_ctx,
             api_key=args.api_key,
             temperature=args.temperature,
             max_tokens=args.max_tokens,

@@ -1,6 +1,7 @@
 """Ollama backend (local models, no API key)."""
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -13,7 +14,7 @@ class OllamaProvider(LLMProvider):
     name = "ollama"
 
     def __init__(self, model: str = "qwen2.5-coder:14b",
-                 host: str = "http://localhost:11434", num_ctx: int = 16384, **kw: Any) -> None:
+                 host: str = "http://localhost:11434", num_ctx: int = 32768, **kw: Any) -> None:
         super().__init__(model, **kw)
         self.host = host.rstrip("/")
         self.num_ctx = num_ctx
@@ -36,9 +37,31 @@ class OllamaProvider(LLMProvider):
                 f"Impossibile contattare Ollama su {self.host} ({e.reason}). "
                 "Avvia il demone con `ollama serve`."
             ) from e
+        except (http.client.HTTPException, ConnectionError, OSError) as e:  # pragma: no cover
+            # Tipicamente il server è stato ucciso mentre caricava il modello:
+            # pesi + cache KV non stanno in memoria.
+            raise LLMError(
+                f"Ollama ha chiuso la connessione senza rispondere ({type(e).__name__}).\n"
+                f"  Causa quasi certa: memoria insufficiente per '{self.model}' con "
+                f"num_ctx={self.num_ctx} (il processo viene terminato dall'OOM killer).\n"
+                f"  → prova un modello più piccolo, oppure --num-ctx 8192\n"
+                f"  → verifica con:  free -h   e   dmesg | tail -20 | grep -i oom\n"
+                f"  → in WSL la RAM si alza da C:\\Users\\<tu>\\.wslconfig ([wsl2] memory=…)"
+            ) from e
 
     # ------------------------------------------------------------------ chat
     def _chat(self, system: str, messages: list[Message], **overrides: Any) -> LLMResponse:
+        # Ollama tronca SILENZIOSAMENTE i prompt più lunghi di num_ctx, e lo fa
+        # dall'inizio: sparirebbe proprio la specifica MXFP4 nel system prompt.
+        approx = (len(system) + sum(len(m.content) for m in messages)) // 4
+        budget = self.num_ctx - overrides.get("max_tokens", self.max_tokens)
+        if approx > budget and self.on_notice:
+            self.on_notice(
+                f"prompt ~{approx} token contro una finestra utile di ~{budget} "
+                f"(num_ctx={self.num_ctx}): Ollama troncherebbe la specifica MXFP4. "
+                f"Rilancia con --num-ctx {2 ** (approx + 4096).bit_length()} "
+                f"oppure --no-static-review.")
+
         payload = {
             "model": overrides.get("model", self.model),
             "messages": [{"role": "system", "content": system}] + [m.as_dict() for m in messages],
@@ -61,6 +84,13 @@ class OllamaProvider(LLMProvider):
             output_tokens=data.get("eval_count", 0),
             raw=data,
         )
+
+    # ------------------------------------------------------------ transienti
+    def is_transient(self, err: Exception) -> bool:
+        low = str(err).lower()
+        return any(s in low for s in ("timed out", "timeout", "connection reset",
+                                      "chiuso la connessione", "remotedisconnected",
+                                      "http 500", "http 502", "http 503"))
 
     # ---------------------------------------------------------------- health
     def health_check(self, live: bool = True) -> tuple[bool, str]:

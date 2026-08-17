@@ -143,6 +143,7 @@ def test_anthropic_retries_without_temperature():
     from mxfp4agent.llm.anthropic_provider import AnthropicProvider
     from mxfp4agent.llm.base import LLMError, LLMResponse
 
+    AnthropicProvider._temperature_blocked.discard("claude-sonnet-5")
     prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
     seen = []
 
@@ -160,6 +161,100 @@ def test_anthropic_retries_without_temperature():
     assert prov.send_temperature is False
     prov.complete("sys", "ancora")
     assert len(seen) == 3 and "temperature" not in seen[2]
+
+
+def test_temperature_discovery_is_shared_across_agents():
+    """Ogni agente ha il proprio provider: il 400 va pagato una volta sola."""
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError, LLMResponse
+
+    AnthropicProvider._temperature_blocked.discard("claude-sonnet-5")
+    calls = []
+
+    def make():
+        p = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
+
+        def fake(body):
+            calls.append("temperature" in body)
+            if "temperature" in body:
+                raise LLMError('HTTP 400: "`temperature` is deprecated for this model."')
+            return LLMResponse("ok", body["model"], "claude", 1, 1)
+
+        p._call = fake
+        return p
+
+    make().complete("s", "planner")     # scopre il problema: 2 chiamate
+    make().complete("s", "coder")       # deve saperlo già: 1 chiamata
+    make().complete("s", "reviewer")    # idem
+    assert calls == [True, False, False, False], calls
+
+
+def test_transient_errors_are_retried_and_fatal_ones_are_not():
+    """Un 529 'Overloaded' non deve buttare via minuti di lavoro degli agenti."""
+    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
+    from mxfp4agent.llm.base import LLMError, LLMResponse
+
+    AnthropicProvider._temperature_blocked.add("claude-sonnet-5")
+    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test",
+                             max_retries=3, retry_backoff=0.0)
+    assert prov.is_transient(LLMError('Anthropic HTTP 529: {"message":"Overloaded"}'))
+    assert prov.is_transient(LLMError("Anthropic HTTP 429: rate_limit"))
+    assert not prov.is_transient(LLMError("Anthropic HTTP 401: authentication_error"))
+    assert not prov.is_transient(LLMError("Anthropic HTTP 400: invalid_request"))
+
+    n = {"i": 0}
+    notes = []
+
+    def flaky(body):
+        n["i"] += 1
+        if n["i"] < 3:
+            raise LLMError('Anthropic HTTP 529: {"message":"Overloaded"}')
+        return LLMResponse("finalmente", body["model"], "claude", 1, 1)
+
+    prov._call = flaky
+    prov.on_retry = notes.append
+    assert prov.complete("s", "u") == "finalmente"
+    assert n["i"] == 3 and len(notes) == 2
+    assert prov.stats["retries"] == 2
+
+    # un errore fatale non viene ritentato
+    prov._call = lambda body: (_ for _ in ()).throw(LLMError("Anthropic HTTP 401: bad key"))
+    try:
+        prov.complete("s", "u")
+    except LLMError:
+        pass
+    else:
+        raise AssertionError("il 401 doveva propagarsi subito")
+
+
+def test_static_review_failure_does_not_kill_the_run(tmp_path):
+    """Se il servizio è giù durante la review, Planner e Coder non vanno buttati."""
+    from mxfp4agent.agents.reviewer import ReviewerAgent
+    from mxfp4agent.agents.tester import TesterAgent
+    from mxfp4agent.llm.base import LLMError
+    from mxfp4agent.toolchain.runner import StageResult, ToolchainReport
+
+    def boom(self, plan, files):
+        raise LLMError("Anthropic HTTP 529: Overloaded")
+
+    def fake_toolchain(self, plan, round_id=0):
+        rep = ToolchainReport()
+        for st in ("elaborate", "lint", "build", "simulate"):
+            rep.add(StageResult(st, True, "(simulata)", detail={"passed": 8}))
+        return rep
+
+    orig_r, orig_t = ReviewerAgent.review, TesterAgent.run_toolchain
+    ReviewerAgent.review, TesterAgent.run_toolchain = boom, fake_toolchain
+    try:
+        cfg = Config(request="dot product", provider="mock", outdir=tmp_path,
+                     max_fix_rounds=0, static_review=True, num_random_vectors=4,
+                     verbose=False)
+        result = Workflow(cfg).run()
+    finally:
+        ReviewerAgent.review, TesterAgent.run_toolchain = orig_r, orig_t
+
+    assert result.ok, result.message
+    assert any(e.get("event") == "skipped" for e in result.trace)
 
 
 def test_anthropic_other_errors_are_not_swallowed():

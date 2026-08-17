@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import random
 import time
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 @dataclasses.dataclass
@@ -46,13 +47,20 @@ class LLMProvider(abc.ABC):
     name: str = "abstract"
 
     def __init__(self, model: str, temperature: float = 0.2, max_tokens: int = 8192,
-                 timeout: int = 600, **kwargs: Any) -> None:
+                 timeout: int = 600, max_retries: int = 4, retry_backoff: float = 3.0,
+                 **kwargs: Any) -> None:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
+        #: hook opzionali (msg: str) -> None, usati dal workflow per il logging
+        self.on_retry: Callable[[str], None] | None = None
+        self.on_notice: Callable[[str], None] | None = None
         self.extra = kwargs
-        self.stats = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "seconds": 0.0}
+        self.stats = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
+                      "seconds": 0.0, "retries": 0}
 
     # ---------------------------------------------------------------- public
     def chat(self, system: str, messages: Iterable[Message] | Iterable[dict[str, str]],
@@ -61,7 +69,24 @@ class LLMProvider(abc.ABC):
         for m in messages:
             norm.append(m if isinstance(m, Message) else Message(m["role"], m["content"]))
         start = time.time()
-        resp = self._chat(system, norm, **overrides)
+
+        # Un sovraccarico temporaneo del servizio non deve buttare via minuti di
+        # lavoro degli agenti precedenti: si riprova con backoff esponenziale.
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = self._chat(system, norm, **overrides)
+                break
+            except LLMError as e:
+                if attempt >= self.max_retries or not self.is_transient(e):
+                    raise
+                delay = self.retry_backoff * (2 ** attempt) + random.uniform(0, 1.5)
+                self.stats["retries"] += 1
+                msg = (f"errore temporaneo ({str(e)[:90]}…) — "
+                       f"riprovo fra {delay:.0f}s [{attempt + 1}/{self.max_retries}]")
+                if self.on_retry:
+                    self.on_retry(msg)
+                time.sleep(delay)
+
         resp.latency_s = time.time() - start
         self.stats["calls"] += 1
         self.stats["input_tokens"] += resp.input_tokens
@@ -71,6 +96,10 @@ class LLMProvider(abc.ABC):
 
     def complete(self, system: str, prompt: str, **overrides: Any) -> str:
         return self.chat(system, [Message("user", prompt)], **overrides).text
+
+    def is_transient(self, err: Exception) -> bool:
+        """True se l'errore è passeggero e ha senso riprovare."""
+        return False
 
     # -------------------------------------------------------------- abstract
     @abc.abstractmethod

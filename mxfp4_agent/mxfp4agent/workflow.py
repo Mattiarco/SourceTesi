@@ -35,12 +35,16 @@ class Workflow:
                 cfg.provider,
                 model=cfg.agent_model(role),
                 host=cfg.host,
+                num_ctx=cfg.num_ctx,
                 api_key=cfg.api_key,
                 temperature=cfg.temperature,
                 max_tokens=cfg.max_tokens,
                 timeout=cfg.timeout,
             )
         self.trace: list[dict] = []
+        for role, prov in self.providers.items():
+            prov.on_retry = (lambda msg, r=role: self.log.fail(f"{r}: {msg}"))
+            prov.on_notice = (lambda msg, r=role: self.log.fail(f"{r}: {msg}"))
 
     # ------------------------------------------------------------------ util
     def _t(self, agent: str, event: str, **kw) -> None:
@@ -112,8 +116,15 @@ class Workflow:
         issues: list[dict] = []
         if cfg.static_review:
             self.log.stage("reviewer", "ispezione statica prima della toolchain…")
-            rres = reviewer.review(plan, files)
-            data = rres.payload or {}
+            try:
+                rres = reviewer.review(plan, files)
+            except LLMError as e:
+                # La review statica è un di più: se il servizio è giù non deve
+                # buttare via il lavoro di Planner e Coder. Si prosegue al Tester.
+                self.log.fail(f"review statica saltata ({str(e)[:120]}) — proseguo")
+                self._t("reviewer", "skipped", reason=str(e)[:200])
+                rres = None
+            data = (rres.payload if rres else None) or {}
             issues = [i for i in data.get("issues", [])
                       if i.get("severity") in ("blocker", "major")]
             verdict = data.get("verdict", "approved")
