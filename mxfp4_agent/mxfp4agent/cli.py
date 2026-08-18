@@ -14,9 +14,9 @@ from .workflow import Workflow
 BANNER = r"""
   __  ____  __ _____ ____  _  _
  |  \/  \ \/ /|  ___|  _ \| || |    Meta-HDL agentic generator
- | |\/| |\  / | |_  | |_) | || |_   Planner → Coder → Reviewer → Tester
- |_|  |_|/_/  |_|   |  __/|__   _|  Chisel/SystemVerilog + Verilator
-                     |_|      |_|
+ | |\/| |\  /\| |_  | |_) | || |_   Planner → Coder → Reviewer → Tester
+ |_|  |_|/_/\_\_|   |  __/|__   _|  Chisel/SystemVerilog + Verilator
+                    |_|      |_|
 """
 
 
