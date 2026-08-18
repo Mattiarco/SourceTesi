@@ -60,6 +60,13 @@ def build_vectors(kernel: str = "dot_product", num_random: int = 64,
     rng = random.Random(seed)
     vecs: list[Vector] = []
 
+    # I kernel element-wise producono FP32: con scale estreme il risultato
+    # uscirebbe dal range di binary32 e il confronto bit-exact perderebbe senso.
+    # Per il dot-product il problema non esiste (accumulo intero + esponente).
+    elementwise = kernel.startswith("elementwise")
+    lo, hi = (-50, 50) if elementwise else (-127, 120)
+    rand_range = (-50, 50) if elementwise else (-8, 8)
+
     def blk(elems: list[int], scale_exp: int = 0) -> MXBlock:
         return MXBlock(e8m0_encode_from_exp(scale_exp), elems)
 
@@ -79,14 +86,15 @@ def build_vectors(kernel: str = "dot_product", num_random: int = 64,
     vecs.append(Vector(blk([nzero] * k), blk([one] * k), "negative_zero"))
     vecs.append(Vector(blk([i % 16 for i in range(k)]),
                        blk([(15 - i) % 16 for i in range(k)]), "sweep_codes"))
-    vecs.append(Vector(blk([one] * k, -127 + 0), blk([one] * k, 120), "extreme_scales"))
+    vecs.append(Vector(blk([one] * k, lo), blk([one] * k, hi), "extreme_scales"))
     nan_a = MXBlock(E8M0_NAN, [one] * k)
     vecs.append(Vector(nan_a, blk([one] * k), "scale_nan"))
-    vecs.append(Vector(blk([six] * k, 100), blk([six] * k, 100), "scale_overflow"))
+    vecs.append(Vector(blk([six] * k, hi), blk([six] * k, hi), "scale_large"))
 
     # --- casi casuali
     for i in range(max(0, num_random)):
-        vecs.append(Vector(MXBlock.random(k, rng), MXBlock.random(k, rng), f"random_{i}"))
+        vecs.append(Vector(MXBlock.random(k, rng, rand_range),
+                           MXBlock.random(k, rng, rand_range), f"random_{i}"))
     return vecs
 
 

@@ -196,7 +196,11 @@ def dot_product_exact_int(a: MXBlock, b: MXBlock) -> tuple[int, int]:
 
 # ------------------------------------------------------------------ FP32/16
 def f32_bits(x: float) -> int:
-    return struct.unpack("<I", struct.pack("<f", x))[0]
+    """Bit pattern IEEE-754 binary32. Fuori range satura a +/-inf come l'hardware."""
+    try:
+        return struct.unpack("<I", struct.pack("<f", x))[0]
+    except OverflowError:
+        return 0xFF800000 if x < 0 else 0x7F800000
 
 
 def bits_f32(b: int) -> float:

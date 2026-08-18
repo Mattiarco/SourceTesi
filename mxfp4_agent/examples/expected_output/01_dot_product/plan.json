@@ -1,0 +1,44 @@
+{
+  "module_name": "MXFP4DotProduct",
+  "meta_hdl": "chisel",
+  "rationale": "Chisel permette di parametrizzare K e di generare l'albero di somma ricorsivamente. Il datapath e' interamente intero: le magnitudini E2M1 sono multipli di 0.5 e le scale E8M0 sono potenze di due, quindi non serve alcuna libreria floating point.",
+  "clocking": "combinational",
+  "latency_cycles": 0,
+  "block_size": 32,
+  "parameters": [
+    {"name": "k", "value": 32, "description": "elementi per blocco MXFP4"}
+  ],
+  "ports": [
+    {"name": "a", "dir": "in", "width": 128, "type": "UInt", "description": "blocco A impacchettato, elemento i nei bit [4i+3:4i]"},
+    {"name": "b", "dir": "in", "width": 128, "type": "UInt", "description": "blocco B, stesso packing"},
+    {"name": "scaleA", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di A, valore 2^(scaleA-127)"},
+    {"name": "scaleB", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di B"},
+    {"name": "accQ2", "dir": "out", "width": 32, "type": "SInt", "description": "accumulo intero esatto in unita' di 1/4"},
+    {"name": "expOut", "dir": "out", "width": 16, "type": "SInt", "description": "(scaleA-127)+(scaleB-127); risultato reale = accQ2/4 * 2^expOut"},
+    {"name": "isNaN", "dir": "out", "width": 1, "type": "Bool", "description": "alta se una delle due scale vale 0xFF"}
+  ],
+  "algorithm": [
+    "Decodifica ogni nibble E2M1 in un intero con segno pari a mag*2, via LUT {0,1,2,3,4,6,8,12}; il codice 0b0001 vale 1 (subnormale 0.5), non 0.",
+    "Applica il segno dal bit 3 con una sottrazione da zero, cosi' anche -0 e' rappresentato correttamente.",
+    "Moltiplica gli interi a coppie: il prodotto e' esatto in unita' di 1/4.",
+    "Somma i k prodotti con un albero bilanciato usando +&, che estende la larghezza a ogni livello.",
+    "Calcola expOut = scaleA + scaleB - 254, cioe' la somma degli esponenti condivisi.",
+    "Alza isNaN se una delle scale e' 0xFF."
+  ],
+  "numerics": {
+    "accumulator_width": 32,
+    "rounding": "nessuno: l'accumulo e' intero ed esatto",
+    "saturation": "non necessaria: |acc| <= 32*144 = 4608, che sta in 14 bit piu' segno",
+    "special_cases": ["subnormale 0.5 (codice 0b0001)", "zero negativo (0b1000)", "saturazione E2M1 a +/-6", "scala NaN 0xFF"]
+  },
+  "test_plan": {
+    "kernel": "dot_product",
+    "num_random": 48,
+    "directed": ["all_zero", "all_one", "all_max", "max_negative", "all_subnormal", "negative_zero", "sweep_codes", "extreme_scales", "scale_nan", "scale_large"]
+  },
+  "risks": [
+    "larghezza dell'accumulatore insufficiente se si usa + invece di +&",
+    "ordine dei nibble invertito nel packing",
+    "subnormale 0b0001 trattato come zero"
+  ]
+}

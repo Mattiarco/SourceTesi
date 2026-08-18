@@ -1,0 +1,46 @@
+{
+  "module_name": "MXFP4ElemMul",
+  "meta_hdl": "chisel",
+  "rationale": "Il prodotto di due elementi E2M1 e' un intero q in [0,144]; scrivendolo come 2^kk*(1+f) si ottengono esponente e mantissa FP32 per pura ricomposizione di campi, senza arrotondamento e senza moltiplicatori floating point. Chisel offre Log2 per l'indice del MSB e rende la generazione dei k rami una riga.",
+  "clocking": "combinational",
+  "latency_cycles": 0,
+  "block_size": 32,
+  "parameters": [
+    {"name": "k", "value": 32, "description": "elementi per blocco"}
+  ],
+  "ports": [
+    {"name": "a", "dir": "in", "width": 128, "type": "UInt", "description": "blocco A, elemento i nei bit [4i+3:4i]"},
+    {"name": "b", "dir": "in", "width": 128, "type": "UInt", "description": "blocco B"},
+    {"name": "scaleA", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di A"},
+    {"name": "scaleB", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di B"},
+    {"name": "out", "dir": "out", "width": 1024, "type": "UInt", "description": "32 risultati IEEE-754 binary32; elemento i nei bit [32i+31:32i]"},
+    {"name": "isNaN", "dir": "out", "width": 1, "type": "Bool", "description": "una delle due scale vale 0xFF"}
+  ],
+  "algorithm": [
+    "Per ogni i: segno = segnoA xor segnoB.",
+    "q = mag2(a_i) * mag2(b_i), intero in [0,144] su 8 bit.",
+    "kk = indice del bit piu' significativo di q, tramite Log2.",
+    "mantissa = (q - 2^kk) << (23 - kk): esatta, nessun bit perso perche' q-2^kk < 2^kk e kk <= 7.",
+    "esponente FP32 biased = kk + scaleA + scaleB - 129.",
+    "q == 0 produce zero con segno, cosi' -0 * x resta -0.",
+    "Se una scala e' 0xFF l'intero blocco e' NaN: si emette il NaN canonico 0x7FC00000.",
+    "L'uscita e' un unico segnale largo invece di un Vec, cosi' in Verilator la parola i coincide con l'elemento i."
+  ],
+  "numerics": {
+    "accumulator_width": 32,
+    "rounding": "nessuno: la conversione MXFP4 -> FP32 e' esatta per costruzione",
+    "saturation": "non applicabile nel range di scale previsto dal contratto",
+    "special_cases": ["zero con segno", "subnormale E2M1 0.5", "NaN canonico su scala 0xFF"]
+  },
+  "test_plan": {
+    "kernel": "elementwise_mul",
+    "num_random": 48,
+    "directed": ["all_zero", "all_one", "all_max", "max_negative", "all_subnormal", "negative_zero", "sweep_codes", "extreme_scales", "scale_nan", "scale_large"]
+  },
+  "risks": [
+    "Log2(0) non definito: il caso q == 0 va intercettato prima",
+    "esponente FP32 sfasato di 1 per un errore nel bias combinato",
+    "perdita del segno sullo zero",
+    "un Vec in IO genererebbe io_out_0..io_out_31, scomodo nel testbench"
+  ]
+}

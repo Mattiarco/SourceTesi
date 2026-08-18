@@ -1,0 +1,45 @@
+{
+  "module_name": "MXFP4DotProductPipe",
+  "meta_hdl": "chisel",
+  "rationale": "Stessa aritmetica esatta della versione combinatoria, ma con un taglio di pipeline fra moltiplicazione e albero di somma: sono i due contributi dominanti al ritardo. Throughput 1 blocco/ciclo, latenza 2. Chisel rende il taglio una modifica di poche righe grazie ai Reg(Vec(...)).",
+  "clocking": "sequential",
+  "latency_cycles": 2,
+  "block_size": 32,
+  "parameters": [
+    {"name": "k", "value": 32, "description": "elementi per blocco MXFP4"}
+  ],
+  "ports": [
+    {"name": "validIn", "dir": "in", "width": 1, "type": "Bool", "description": "il blocco presente sugli ingressi e' valido in questo ciclo"},
+    {"name": "a", "dir": "in", "width": 128, "type": "UInt", "description": "blocco A, elemento i nei bit [4i+3:4i]"},
+    {"name": "b", "dir": "in", "width": 128, "type": "UInt", "description": "blocco B"},
+    {"name": "scaleA", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di A"},
+    {"name": "scaleB", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di B"},
+    {"name": "validOut", "dir": "out", "width": 1, "type": "Bool", "description": "validIn ritardato di 2 cicli"},
+    {"name": "accQ2", "dir": "out", "width": 32, "type": "SInt", "description": "accumulo intero in unita' di 1/4"},
+    {"name": "expOut", "dir": "out", "width": 16, "type": "SInt", "description": "esponente condiviso risultante"},
+    {"name": "isNaN", "dir": "out", "width": 1, "type": "Bool", "description": "scala NaN"}
+  ],
+  "algorithm": [
+    "Stadio 1: decodifica E2M1 dei 2k nibble e calcolo dei k prodotti, registrati in Reg(Vec(k, SInt(12.W))).",
+    "Stadio 1: registra anche esponente combinato, flag NaN e valid.",
+    "Stadio 2: albero di somma bilanciato sui prodotti registrati, risultato in un registro a 32 bit.",
+    "Stadio 2: propaga esponente, NaN e valid di un ulteriore ciclo.",
+    "Nessuno stallo e nessun handshake: il pipeline accetta un blocco per ciclo incondizionatamente."
+  ],
+  "numerics": {
+    "accumulator_width": 32,
+    "rounding": "nessuno: accumulo intero esatto",
+    "saturation": "non necessaria, |acc| <= 4608",
+    "special_cases": ["subnormale 0.5", "zero negativo", "scala NaN", "reset sincrono attivo alto"]
+  },
+  "test_plan": {
+    "kernel": "dot_product",
+    "num_random": 48,
+    "directed": ["streaming back-to-back per verificare il throughput", "validOut basso dopo lo svuotamento", "stessi casi limite della versione combinatoria"]
+  },
+  "risks": [
+    "disallineamento fra dati e valid nel pipeline",
+    "reset non applicato a tutti i registri di stato",
+    "testbench che legge le uscite prima che il pipeline sia pieno"
+  ]
+}
