@@ -33,6 +33,8 @@ lazy val root = (project in file("."))
 ELABORATE_SCALA = """// GENERATO AUTOMATICAMENTE — non modificare.
 package mxfp4
 
+// disallowPackedArrays: il frontend Verilog di Yosys non legge gli array impacchettati
+// (`wire [7:0][3:0] x`) che firtool emette per default; senza, la sintesi fallisce.
 // `_root_.` è necessario: dentro `package mxfp4` il nome `circt` verrebbe
 // risolto come `chisel3.util.circt` se il file importasse `chisel3.util._`.
 import _root_.circt.stage.ChiselStage
@@ -42,7 +44,7 @@ object Elaborate extends App {{
   ChiselStage.emitSystemVerilogFile(
     new {module}(),
     Array("--target-dir", outDir),
-    Array("-disable-all-randomization", "-strip-debug-info", "--lowering-options=disallowLocalVariables")
+    Array("-disable-all-randomization", "-strip-debug-info", "--lowering-options=disallowLocalVariables,disallowPackedArrays")
   )
   println("[elaborate] SystemVerilog scritto in " + outDir)
 }}

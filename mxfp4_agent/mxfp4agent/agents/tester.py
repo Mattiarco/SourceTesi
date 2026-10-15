@@ -14,7 +14,7 @@ from ..utils import ExtractedFile, truncate
 from .base import Agent, AgentResult
 
 SYSTEM = """Sei il TESTER di un sistema agentico per Meta-HDL. Ricevi il log grezzo di
-sbt/Verilator/simulazione e lo trasformi in una diagnosi breve e operativa per
+sbt/Verilator/simulazione/sintesi Yosys e lo trasformi in una diagnosi breve e operativa per
 l'agente Fixer.
 
 Rispondi con al massimo 12 righe:
@@ -25,7 +25,13 @@ EVIDENZA: <le 1-3 righe di log decisive>
 
 Se il log mostra vettori falliti, indica QUALE proprietà MXFP4 è violata
 (bias, subnormale 0.5, saturazione a 6, ordine dei nibble, larghezza
-dell'accumulatore, segno). Non riscrivere il codice: quello è compito del Fixer.
+dell'accumulatore, segno).
+
+Se fallisce la fase `synth`, l'RTL non è sintetizzabile: cerca latch inferiti
+(assegnazioni incomplete), anelli combinatori, driver multipli, costrutti non
+supportati da Yosys.
+
+Non riscrivere il codice: quello è compito del Fixer.
 """
 
 
@@ -33,9 +39,12 @@ class TesterAgent(Agent):
     name = "tester"
     system_prompt = SYSTEM
 
-    def __init__(self, provider, log, workdir: Path, **kw) -> None:
+    def __init__(self, provider, log, workdir: Path, synth: bool = True,
+                 target_mhz: float = 100.0, **kw) -> None:
         super().__init__(provider, log, **kw)
         self.workdir = Path(workdir)
+        self.synth = synth
+        self.target_mhz = target_mhz
 
     # ------------------------------------------------------------ filesystem
     def materialize(self, plan: dict, files: list[ExtractedFile],
@@ -55,7 +64,8 @@ class TesterAgent(Agent):
 
     # -------------------------------------------------------------- toolchain
     def run_toolchain(self, plan: dict, round_id: int = 0) -> ToolchainReport:
-        runner = ToolchainRunner(self.workdir, plan["module_name"], plan["meta_hdl"])
+        runner = ToolchainRunner(self.workdir, plan["module_name"], plan["meta_hdl"],
+                                 synth=self.synth, target_mhz=self.target_mhz)
         rep = runner.run_all()
 
         # i log delle fasi vanno sempre su disco: senza, l'errore di build si
@@ -70,6 +80,8 @@ class TesterAgent(Agent):
                 self.log.fail(f"{s.stage}: saltato — {s.log.splitlines()[0]}")
             elif s.skipped:
                 self.log.info(f"{s.stage}: non applicabile")
+            elif s.ok and s.stage in ("synth", "implement"):
+                self.log.ok(f"{s.stage}: {s.log.splitlines()[0]}")
             elif s.ok:
                 self.log.ok(f"{s.stage} ok")
             else:

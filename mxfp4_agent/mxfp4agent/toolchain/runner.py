@@ -6,18 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .shell import CmdResult, run, which
+from .stage import StageResult
+from .synth import run_implement, run_synth
 
 PASS_RE = re.compile(r"TEST\s+PASSED\s*\((\d+)", re.IGNORECASE)
 FAIL_RE = re.compile(r"TEST\s+FAILED\s*\((\d+)\s*/\s*(\d+)", re.IGNORECASE)
-
-
-@dataclass
-class StageResult:
-    stage: str          # elaborate | lint | build | simulate
-    ok: bool
-    log: str
-    skipped: bool = False
-    detail: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -40,6 +33,19 @@ class ToolchainReport:
     def first_failure(self) -> StageResult | None:
         return next((s for s in self.stages if not s.ok and not s.skipped), None)
 
+    @property
+    def physical(self) -> dict:
+        """Metriche fisiche (risorse e timing) se le fasi synth/implement sono state eseguite."""
+        out: dict = {}
+        for s in self.stages:
+            if s.skipped:
+                continue
+            if s.stage == "synth" and s.ok:
+                out["synth"] = {"resources_yosys": s.detail.get("resources_yosys", {})}
+            elif s.stage == "implement":
+                out["implement"] = {k: v for k, v in s.detail.items()}
+        return out
+
     def add(self, s: StageResult) -> StageResult:
         self.stages.append(s)
         return s
@@ -55,7 +61,8 @@ class ToolchainRunner:
 
     def __init__(self, root: Path, module: str, meta_hdl: str = "chisel",
                  sbt_timeout: int = 1800, verilator_timeout: int = 900,
-                 sim_timeout: int = 300) -> None:
+                 sim_timeout: int = 300, synth: bool = True,
+                 target_mhz: float = 100.0, synth_timeout: int = 900) -> None:
         # SEMPRE assoluto: i comandi girano con cwd=self.root, quindi un path
         # relativo verrebbe risolto due volte ("out/X/out/X/rtl/...") e Verilator
         # non troverebbe l'RTL appena generato.
@@ -65,6 +72,10 @@ class ToolchainRunner:
         self.sbt_timeout = sbt_timeout
         self.verilator_timeout = verilator_timeout
         self.sim_timeout = sim_timeout
+        self.synth_enabled = synth
+        self.target_mhz = target_mhz
+        self.synth_timeout = synth_timeout
+        self._netlist: Path | None = None
 
     # -------------------------------------------------------------- percorsi
     @property
@@ -177,6 +188,19 @@ class ToolchainRunner:
         return StageResult("simulate", False,
                            r.log + "\n\n[runner] Nessuna riga TEST PASSED/FAILED trovata.")
 
+    # ------------------------------------------------------------- 5. sintesi
+    def synth(self) -> StageResult:
+        """Sintesi Yosys: l'RTL deve essere sintetizzabile, e si estraggono le risorse."""
+        s = run_synth(self.root, self.module, self.rtl_files(), self.synth_timeout)
+        self._netlist = Path(s.detail["netlist"]) if s.ok and s.detail.get("netlist") else None
+        return s
+
+    # ------------------------------------------------------- 6. implementation
+    def implement(self) -> StageResult:
+        """Place & route nextpnr-ecp5: Fmax / ritardo e utilizzo (informativa)."""
+        return run_implement(self.root, self.module, self._netlist, self.target_mhz,
+                             timeout=self.synth_timeout)
+
     # ------------------------------------------------------------------ tutto
     def run_all(self, stop_on_error: bool = True) -> ToolchainReport:
         rep = ToolchainReport()
@@ -186,4 +210,11 @@ class ToolchainRunner:
                 break
             if s.skipped and s.stage in ("elaborate", "build") and not s.ok:
                 break
+        # Le fasi fisiche hanno senso solo su un design funzionalmente corretto:
+        # prima si ripara la funzione, poi si guardano sintesi e timing.
+        sim = next((s for s in rep.stages if s.stage == "simulate"), None)
+        if self.synth_enabled and sim is not None and sim.ok:
+            syn = rep.add(self.synth())
+            if syn.ok and not syn.skipped:
+                rep.add(self.implement())
         return rep

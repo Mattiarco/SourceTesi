@@ -89,7 +89,8 @@ class Workflow:
         self._t("planner", "plan", module=plan["module_name"], hdl=plan["meta_hdl"])
 
         workdir = Path(cfg.outdir) / plan["module_name"]
-        tester = TesterAgent(self.providers["tester"], self.log, workdir)
+        tester = TesterAgent(self.providers["tester"], self.log, workdir,
+                             synth=cfg.synth, target_mhz=cfg.target_mhz)
 
         compiled = PlannerAgent.compile_coder_prompt(plan, cfg.request)
         workdir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +157,7 @@ class Workflow:
                 return RunResult(False, plan, files, workdir, rnd, msg,
                                  self.trace, self._stats())
             last_report = tres.payload
+            self._physical = last_report.physical if last_report else {}
             self._t("tester", "toolchain", round=rnd,
                     summary=last_report.summary() if last_report else "")
 
@@ -253,6 +255,7 @@ class Workflow:
             "config": self.cfg.to_dict(),
             "files": [f.path for f in files],
             "llm_stats": self._stats(),
+            "physical": getattr(self, "_physical", {}),
             "trace": self.trace,
         }
         (workdir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False),
@@ -282,6 +285,7 @@ Generato automaticamente dalla pipeline agentica (Planner → Coder → Reviewer
 ## Riprodurre la verifica
 ```bash
 {cmd}make run                         # verilator: build + simulazione
+mxfp4-agent --resume .           # + sintesi Yosys e timing nextpnr -> physical.json
 ```
 
 ## Interpretazione dell'uscita

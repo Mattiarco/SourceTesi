@@ -59,7 +59,7 @@ def which(name: str) -> str | None:
 def tool_report() -> dict[str, str | None]:
     """Stato della toolchain sulla macchina corrente."""
     out: dict[str, str | None] = {}
-    for tool in ("sbt", "verilator", "java", "g++", "make"):
+    for tool in ("sbt", "verilator", "yosys", "nextpnr-ecp5", "java", "g++", "make"):
         path = which(tool)
         out[tool] = path
     return out

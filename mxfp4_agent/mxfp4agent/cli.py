@@ -68,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--vectors", type=int, default=64, help="vettori casuali di test")
     w.add_argument("--seed", type=int, default=1234)
     w.add_argument("--keep-going", action="store_true")
+    w.add_argument("--no-synth", action="store_true",
+                   help="salta sintesi (Yosys) e implementation con timing (nextpnr)")
+    w.add_argument("--target-mhz", type=float, default=100.0,
+                   help="frequenza obiettivo per il timing dell'implementation")
     w.add_argument("-q", "--quiet", action="store_true")
     w.add_argument("-c", "--config", type=Path, help="file JSON di configurazione")
 
@@ -99,6 +103,9 @@ def cmd_doctor(args) -> int:
             print("  verilator : sudo apt install verilator   |  brew install verilator")
         if "sbt" in missing:
             print("  sbt+JDK17 : https://www.scala-sbt.org/download  (serve solo per Chisel)")
+    if not rep.get("yosys") or not rep.get("nextpnr-ecp5"):
+        print("\nOpzionali (sintesi e timing; senza, quelle fasi vengono saltate):")
+        print("  yosys + nextpnr-ecp5 : sudo apt install yosys nextpnr-ecp5   |  brew install yosys nextpnr-ecp5")
     return 0 if not missing else 1
 
 
@@ -111,13 +118,20 @@ def cmd_resume(args) -> int:
         print(f"plan.json non trovato in {root}", file=sys.stderr)
         return 2
     plan = json.loads(plan_file.read_text(encoding="utf-8"))
-    runner = ToolchainRunner(root, plan["module_name"], plan["meta_hdl"])
+    runner = ToolchainRunner(root, plan["module_name"], plan["meta_hdl"],
+                             synth=not args.no_synth, target_mhz=args.target_mhz)
     rep = runner.run_all()
     for s in rep.stages:
         state = "SKIP" if s.skipped else ("OK" if s.ok else "FAIL")
         print(f"[{state:<4}] {s.stage}")
         if not s.ok and not s.skipped:
             print(s.log[-4000:])
+        elif s.stage in ("synth", "implement") and not s.skipped:
+            print("       " + s.log.splitlines()[0])
+    if rep.physical:
+        import json as _json
+        (root / "physical.json").write_text(_json.dumps(rep.physical, indent=2), encoding="utf-8")
+        print(f"\nmetriche fisiche → {root / 'physical.json'}")
     return 0 if rep.ok else 1
 
 
@@ -163,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
             num_random_vectors=args.vectors,
             seed=args.seed,
             keep_going=args.keep_going or args.selftest,
+            synth=not args.no_synth,
+            target_mhz=args.target_mhz,
             verbose=not args.quiet,
         )
 
