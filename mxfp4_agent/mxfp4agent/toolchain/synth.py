@@ -55,7 +55,9 @@ def _clean_yosys(log: str, limit: int = 5000) -> str:
     return out[-limit:]
 
 
-_LATCH = re.compile(r"^Latch inferred for signal `\\?([^']+)'", re.MULTILINE)
+# Yosys < 0.5x stampa "Latch inferred …", le versioni recenti "ERROR: Latch inferred …"
+_LATCH = re.compile(r"^(?:ERROR:\s*|Warning:\s*)?Latch inferred for signal `\\?([^']+)'",
+                    re.MULTILINE)
 
 
 def detect_latches(yosys_log: str) -> list[str]:

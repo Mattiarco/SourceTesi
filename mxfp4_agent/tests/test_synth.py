@@ -61,7 +61,9 @@ def test_synth_flags_latch_and_packed_arrays(tmp_path):
                   "  wire [3:0][3:0] g = {4'h1, 4'h2, 4'h3, 4'h4};\n"
                   "  assign y = g[i];\nendmodule")
     s = run_synth(tmp_path, "P", [pk])
-    assert not s.ok and "disallowPackedArrays" in s.log
+    # Dipende dalla versione: Yosys vecchi rifiutano gli array impacchettati (e
+    # allora serve il suggerimento), Yosys >= 0.4x li legge e la sintesi riesce.
+    assert s.ok or "disallowPackedArrays" in s.log, s.log[-800:]
 
 
 # Righe reali di Yosys 0.70 (pass PROC_DLATCH) sul design di riferimento MXFP4DotProduct:
@@ -80,3 +82,5 @@ def test_no_latch_inferred_is_not_a_latch():
 
     assert detect_latches(YOSYS_NO_LATCH) == []
     assert detect_latches(YOSYS_LATCH) == ["L.y"]
+    # formato di Yosys 0.70: il latch è un errore
+    assert detect_latches("ERROR: " + YOSYS_LATCH.splitlines()[1]) == ["L.y"]

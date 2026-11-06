@@ -32,6 +32,12 @@ class CmdResult:
         return "\n".join(parts)
 
 
+def _text(x) -> str:
+    if x is None:
+        return ""
+    return x.decode("utf-8", "replace") if isinstance(x, bytes) else x
+
+
 def run(cmd: list[str], cwd: Path | str | None = None, timeout: int = 900,
         env: dict | None = None) -> CmdResult:
     merged = {**os.environ, **(env or {})}
@@ -47,7 +53,8 @@ def run(cmd: list[str], cwd: Path | str | None = None, timeout: int = 900,
                            text=True, timeout=timeout, env=merged, errors="replace")
         return CmdResult(cmd, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired as e:
-        return CmdResult(cmd, 124, e.stdout or "", e.stderr or "", timed_out=True)
+        # Anche con text=True, TimeoutExpired porta stdout/stderr come bytes.
+        return CmdResult(cmd, 124, _text(e.stdout), _text(e.stderr), timed_out=True)
     except FileNotFoundError:
         return CmdResult(cmd, 127, "", f"comando non trovato: {cmd[0]}")
 
