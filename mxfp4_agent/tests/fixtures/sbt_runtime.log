@@ -1,0 +1,27 @@
+[info] welcome to sbt 1.10.1 (Oracle Corporation Java 21.0.1)
+[info] loading project definition from /home/user/out/Broken\project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxfp4-generated (in build file:/home/user/out/Broken/)
+[info] compiling 2 Scala sources to /home/user/out/Broken\target\scala-2.13\classes ...
+[info] done compiling
+[info] running mxfp4.Elaborate 
+[error] chisel3.package$ChiselException: Connection between sink (Broken.io.out: IO[SInt<9>]) and source (Broken.io.a: IO[UInt<8>]) failed @: Sink (SInt<9>) and Source (UInt<8>) have different types.
+[error] 	at ... ()
+[error] 	at mxfp4.Broken.<init>(Broken.scala:11)
+[error] 	at mxfp4.Elaborate$.$anonfun$new$1(Elaborate.scala:13)
+[error] 	at chisel3.Module$.evaluate(Module.scala:88)
+[error] 	at chisel3.Module$.do_apply(Module.scala:35)
+[error] 	at chisel3.stage.phases.Elaborate.$anonfun$transform$2(Elaborate.scala:52)
+[error] 	at chisel3.internal.Builder$.$anonfun$buildImpl$1(Builder.scala:1042)
+[error] 	at scala.util.DynamicVariable.withValue(DynamicVariable.scala:59)
+[error] 	at chisel3.internal.Builder$.buildImpl(Builder.scala:1032)
+[error] 	at chisel3.internal.Builder$.$anonfun$build$1(Builder.scala:1023)
+[error] 	at logger.Logger$.$anonfun$makeScope$4(Logger.scala:148)
+[error] 	at scala.util.DynamicVariable.withValue(DynamicVariable.scala:59)
+[error] 	at logger.Logger$.makeScope(Logger.scala:146)
+[error] 	at logger.Logger$.makeScope(Logger.scala:133)
+[error] 	at ... ()
+[error] 	at ... (Stack trace trimmed to user code only. Rerun with --full-stacktrace to see the full stack trace)
+[error] stack trace is suppressed; run 'last Compile / runMain' for the full output
+[error] (Compile / runMain) chisel3.package$ChiselException: Connection between sink (Broken.io.out: IO[SInt<9>]) and source (Broken.io.a: IO[UInt<8>]) failed @: Sink (SInt<9>) and Source (UInt<8>) have different types.
+[error] Total time: 5 s, completed 6 nov 2026, 17:09:43

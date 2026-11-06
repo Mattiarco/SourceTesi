@@ -1,0 +1,29 @@
+[info] welcome to sbt 1.10.1 (Oracle Corporation Java 21.0.1)
+[info] loading project definition from /home/user/out/Broken\project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxfp4-generated (in build file:/home/user/out/Broken/)
+[info] compiling 2 Scala sources to /home/user/out/Broken\target\scala-2.13\classes ...
+[info] done compiling
+[info] running mxfp4.Elaborate 
+[error] circt.stage.phases.Exceptions$FirtoolNonZeroExitCode: /home/user/.cache/llvm-firtool\llvm-firtool\cache\1.62.1\bin\firtool returned a non-zero exit code. Note that this version of Chisel (6.6.0) was published against firtool version 1.62.1.
+[error] ------------------------------------------------------------------------------
+[error] ExitCode:
+[error] 1
+[error] STDOUT:
+[error] 
+[error] STDERR:
+[error] \\src\\main\\scala\\mxfp4\\Broken.scala:11:15: error: sink "w" not fully initialized in "Broken"
+[error] 
+[error] ------------------------------------------------------------------------------
+[error] stack trace is suppressed; run 'last Compile / runMain' for the full output
+[error] (Compile / runMain) circt.stage.phases.Exceptions$FirtoolNonZeroExitCode: /home/user/.cache/llvm-firtool\llvm-firtool\cache\1.62.1\bin\firtool returned a non-zero exit code. Note that this version of Chisel (6.6.0) was published against firtool version 1.62.1.
+[error] ------------------------------------------------------------------------------
+[error] ExitCode:
+[error] 1
+[error] STDOUT:
+[error] 
+[error] STDERR:
+[error] \\src\\main\\scala\\mxfp4\\Broken.scala:11:15: error: sink "w" not fully initialized in "Broken"
+[error] 
+[error] ------------------------------------------------------------------------------
+[error] Total time: 13 s, completed 6 nov 2026, 17:09:13

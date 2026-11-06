@@ -1,0 +1,13 @@
+[info] [launcher] getting org.scala-sbt sbt 1.10.1  (this may take some time)...
+[info] [launcher] getting Scala 2.12.19 (for sbt)...
+[info] welcome to sbt 1.10.1 (Oracle Corporation Java 21.0.1)
+[info] loading project definition from /home/user/out/Broken/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxfp4-generated (in build file:/home/user/out/Broken/)
+[info] compiling 2 Scala sources to /home/user/out/Broken/target/scala-2.13/classes ...
+[error] /home/user/out/Broken/src/main/scala/mxfp4/Broken.scala:11:11: not found: value Cat
+[error]   val y = Cat(io.a, io.a)
+[error]           ^
+[error] one error found
+[error] (Compile / compileIncremental) Compilation failed
+[error] Total time: 3 s, completed 6 nov 2026, 17:08:53

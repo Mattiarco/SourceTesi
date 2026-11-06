@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..toolchain import ToolchainReport, ToolchainRunner, scaffold, write_header
+from ..toolchain.errsum import summarize_errors
 from ..toolchain.testvectors import HEADER_NAME
 from ..utils import ExtractedFile, truncate
 from .base import Agent, AgentResult
@@ -94,13 +95,15 @@ class TesterAgent(Agent):
         fail = report.first_failure
         if fail is None:
             return AgentResult(True, None, "", "nessun fallimento da diagnosticare")
+        summary = summarize_errors(fail.log, self.workdir)
+        evidence = f"{summary}\n\n{fail.log[-1500:]}" if summary else truncate(fail.log, 6000)
         prompt = f"""Modulo: {plan['module_name']} (Chisel)
 Fase fallita: {fail.stage}
 Kernel di test: {plan.get('test_plan', {}).get('kernel')}
 
 LOG:
 ```
-{truncate(fail.log, 6000)}
+{evidence}
 ```
 
 Produci la diagnosi nel formato richiesto."""

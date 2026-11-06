@@ -11,6 +11,7 @@ from .config import AGENTS, Config
 from .knowledge.references import select_reference
 from .llm import LLMError, build_provider
 from .toolchain import check_path_sanity, format_tool_report, tool_report
+from .toolchain.errsum import summarize_errors
 from .utils import ExtractedFile, Log
 
 
@@ -223,9 +224,10 @@ class Workflow:
             self.log.stage("reviewer", f"fix round {rnd + 1} (fase: {fail.stage})…")
             if tres.notes:
                 self.log.block("diagnosi del tester", tres.notes, 1200)
+            evidence = self.fixer_evidence(fail, workdir)
             try:
                 fres = reviewer.fix(plan, files, fail.stage,
-                                    f"{tres.notes}\n\n{fail.log}", issues, rnd + 1,
+                                    f"{tres.notes}\n\n{evidence}", issues, rnd + 1,
                                     previous_attempts=causes)
             except LLMError as e:
                 msg = (f"Il provider LLM è caduto durante il fix del round {rnd + 1}: {e}\n"
@@ -251,6 +253,20 @@ class Workflow:
                          self.trace, self._stats())
 
     # -------------------------------------------------------------- finalize
+    @staticmethod
+    def fixer_evidence(fail, workdir: Path, tail_chars: int = 1500) -> str:
+        """Log per il Fixer: riassunto file:riga + contesto, più la coda del log grezzo.
+
+        Il riassunto è ciò su cui il modello deve agire; la coda resta perché
+        un formato di errore non riconosciuto non deve far perdere informazione.
+        """
+        summary = summarize_errors(fail.log, workdir)
+        if not summary:
+            return fail.log
+        tail = fail.log[-tail_chars:]
+        return (f"RIASSUNTO DEGLI ERRORI (posizioni nel tuo codice):\n{summary}\n\n"
+                f"--- coda del log grezzo ---\n{tail}")
+
     @staticmethod
     def _signature(fail) -> str:
         """Impronta di un fallimento, insensibile a path assoluti e timestamp."""

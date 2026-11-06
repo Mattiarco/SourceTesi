@@ -1,0 +1,13 @@
+[info] welcome to sbt 1.10.1 (Oracle Corporation Java 21.0.1)
+[info] loading project definition from /home/user/out/Broken/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxfp4-generated (in build file:/home/user/out/Broken/)
+[info] compiling 2 Scala sources to /home/user/out/Broken/target/scala-2.13/classes ...
+[error] /home/user/out/Broken/src/main/scala/mxfp4/Broken.scala:10:22: type mismatch;
+[error]  found   : chisel3.UInt
+[error]  required: chisel3.SInt
+[error]   val s: SInt = io.a + 1.U
+[error]                      ^
+[error] one error found
+[error] (Compile / compileIncremental) Compilation failed
+[error] Total time: 2 s, completed 6 nov 2026, 17:09:32
