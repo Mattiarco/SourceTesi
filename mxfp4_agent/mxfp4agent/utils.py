@@ -122,6 +122,21 @@ def truncate(text: str, limit: int = 6000, tail: int = 1500) -> str:
 
 
 # ------------------------------------------------------------------ logging
+def force_utf8_stdio() -> None:
+    """Forza UTF-8 su stdout/stderr.
+
+    Su Windows, con l'output rediretto (pipe, file, subprocess di bench.py),
+    Python usa la codepage ANSI (cp1252) e il primo `→` o `✔` stampato fa
+    crollare il processo con UnicodeEncodeError.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # stream sostituito (es. test)
+            pass
+
+
 class Log:
     COLORS = {"planner": "\033[95m", "coder": "\033[94m", "reviewer": "\033[93m",
               "tester": "\033[96m", "ok": "\033[92m", "err": "\033[91m", "dim": "\033[90m"}

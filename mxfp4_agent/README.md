@@ -82,8 +82,7 @@ python run.py --resume out/MXFP4DotProduct
 ```
 
 Opzioni utili: `--few-shot` (aggiunge un design di riferimento al prompt, utile
-con modelli piccoli), `--max-fix-rounds N`, `--vectors N`, `--no-static-review`,
-`--keep-going`.
+con modelli piccoli), `--max-fix-rounds N`, `--vectors N`, `--no-static-review`.
 
 ## Output
 

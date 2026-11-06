@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import Config
 from .llm import DEFAULT_MODELS, build_provider
 from .toolchain import ToolchainRunner, format_tool_report, tool_report
+from .utils import force_utf8_stdio
 from .workflow import Workflow
 
 BANNER = r"""
@@ -67,7 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="includi un design di riferimento nel prompt (utile con modelli piccoli)")
     w.add_argument("--vectors", type=int, default=64, help="vettori casuali di test")
     w.add_argument("--seed", type=int, default=1234)
-    w.add_argument("--keep-going", action="store_true")
     w.add_argument("--no-synth", action="store_true",
                    help="salta sintesi (Yosys) e implementation con timing (nextpnr)")
     w.add_argument("--target-mhz", type=float, default=100.0,
@@ -78,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     m = p.add_argument_group("modalità speciali")
     m.add_argument("--doctor", action="store_true", help="controlla LLM e toolchain")
     m.add_argument("--selftest", action="store_true", help="pipeline completa con provider mock")
+    m.add_argument("--strict", action="store_true",
+                   help="con --selftest: fallisce anche se una fase è saltata per tool mancanti")
     m.add_argument("--resume", type=Path, metavar="DIR",
                    help="riesegui solo la toolchain su un progetto già generato")
     return p
@@ -136,6 +138,7 @@ def cmd_resume(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    force_utf8_stdio()
     args = build_parser().parse_args(argv)
 
     if args.doctor:
@@ -176,7 +179,6 @@ def main(argv: list[str] | None = None) -> int:
             few_shot=args.few_shot,
             num_random_vectors=args.vectors,
             seed=args.seed,
-            keep_going=args.keep_going or args.selftest,
             synth=not args.no_synth,
             target_mhz=args.target_mhz,
             verbose=not args.quiet,
@@ -199,7 +201,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"📁 {result.workdir.resolve()}")
         for f in result.files:
             print(f"   • {f.path}")
-    return 0 if result.ok else 1
+    if result.ok:
+        return 0
+    if args.selftest and result.blocked and not args.strict:
+        # Il selftest verifica la pipeline, non la macchina: se tutte le fasi
+        # eseguibili sono passate e mancano solo tool esterni, è un successo
+        # parziale dichiarato (usa --strict per pretendere la toolchain completa).
+        print("ℹ️  selftest: fasi eseguibili superate; fasi saltate per tool mancanti "
+              "(vedi sopra). --strict per considerarlo un fallimento.")
+        return 0
+    return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

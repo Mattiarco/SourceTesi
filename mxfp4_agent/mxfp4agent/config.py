@@ -34,7 +34,6 @@ class Config:
     few_shot: bool = False
     num_random_vectors: int = 64
     seed: int = 1234
-    keep_going: bool = False           # continua anche se la toolchain manca
     synth: bool = True                 # sintesi Yosys + P&R nextpnr dopo la simulazione
     target_mhz: float = 100.0          # vincolo di frequenza per il timing (nextpnr)
     verbose: bool = True

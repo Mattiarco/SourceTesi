@@ -96,6 +96,8 @@ def _call(fn, name: str, tmp_root: Path) -> None:
 
 
 def main(argv: list[str]) -> int:
+    from mxfp4agent.utils import force_utf8_stdio
+    force_utf8_stdio()
     try:
         import pytest  # noqa: F401
         native = True

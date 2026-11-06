@@ -493,7 +493,7 @@ def test_end_to_end_mock_materializes_project(tmp_path):
     try:
         cfg = Config(request="dot product mxfp4 combinatorio", provider="mock",
                      outdir=tmp_path, max_fix_rounds=0, static_review=False,
-                     num_random_vectors=8, keep_going=True, verbose=False)
+                     num_random_vectors=8, verbose=False)
         result = Workflow(cfg).run()
     finally:
         TesterAgent.run_toolchain = original

@@ -23,6 +23,7 @@ class RunResult:
     message: str = ""
     trace: list[dict] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    blocked: bool = False      # toolchain esterna assente: generato ma non verificato
 
 
 class Workflow:
@@ -173,10 +174,8 @@ class Workflow:
                        "`--resume` oppure `make run` nella cartella di output.")
                 self.log.fail(msg)
                 self._finalize(workdir, plan, files, False, msg)
-                if not cfg.keep_going:
-                    return RunResult(False, plan, files, workdir, rnd, msg,
-                                     self.trace, self._stats())
-                break
+                return RunResult(False, plan, files, workdir, rnd, msg,
+                                 self.trace, self._stats(), blocked=True)
 
             if rnd == cfg.max_fix_rounds:
                 break
