@@ -179,9 +179,16 @@ class Workflow:
                 self.log.fail(f"[{i.get('severity')}] {i.get('file','')}: {i.get('problem','')}")
             self._t("reviewer", "review", verdict=verdict, issues=len(issues))
             if verdict == "changes_required" and issues:
-                fres = reviewer.fix(plan, files, "static_review",
-                                    "Rilievi della review statica (vedi elenco).", issues, 0)
-                if fres.ok:
+                try:
+                    fres = reviewer.fix(plan, files, "static_review",
+                                        "Rilievi della review statica (vedi elenco).", issues, 0)
+                except LLMError as e:
+                    # come per la review: la patch statica è facoltativa, il
+                    # codice del Coder va comunque alla toolchain
+                    self.log.fail(f"patch statica saltata ({str(e)[:120]}) — proseguo")
+                    self._t("reviewer", "static_fix_skipped", reason=str(e)[:200])
+                    fres = None
+                if fres is not None and fres.ok:
                     files = fres.payload
                     self.log.ok(f"patch statica applicata — {fres.notes}")
 

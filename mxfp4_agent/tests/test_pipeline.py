@@ -466,3 +466,36 @@ def test_timeout_output_is_text_not_bytes():
              timeout=1)
     assert r.timed_out and isinstance(r.stdout, str) and isinstance(r.stderr, str)
     assert "TIMEOUT" in r.log
+
+
+def test_static_fix_failure_does_not_kill_the_run(tmp_path):
+    """Osservato in una run reale: Ollama ucciso dall'OOM durante la patch statica."""
+    from mxfp4agent.agents.reviewer import ReviewerAgent
+    from mxfp4agent.agents.tester import TesterAgent
+    from mxfp4agent.llm.base import LLMError
+    from mxfp4agent.toolchain.runner import StageResult, ToolchainReport
+
+    def review(self, plan, files):
+        from mxfp4agent.agents.base import AgentResult
+        return AgentResult(True, {"verdict": "changes_required",
+                                  "issues": [{"severity": "major", "file": "x", "problem": "p"}]})
+
+    def boom(self, *a, **k):
+        raise LLMError("Impossibile contattare Ollama su http://localhost:11434 (Connection refused)")
+
+    def fake_toolchain(self, plan, round_id=0, pre=None):
+        rep = ToolchainReport()
+        for st in ("elaborate", "lint", "build", "simulate"):
+            rep.add(StageResult(st, True, "(simulata)", detail={"passed": 8}))
+        return rep
+
+    saved = ReviewerAgent.review, ReviewerAgent.fix, TesterAgent.run_toolchain
+    ReviewerAgent.review, ReviewerAgent.fix, TesterAgent.run_toolchain = review, boom, fake_toolchain
+    try:
+        cfg = Config(request="dot product", provider="mock", outdir=tmp_path,
+                     max_fix_rounds=0, static_review=True, num_random_vectors=4, verbose=False)
+        result = Workflow(cfg).run()
+    finally:
+        ReviewerAgent.review, ReviewerAgent.fix, TesterAgent.run_toolchain = saved
+    assert result.ok, result.message
+    assert any(e.get("event") == "static_fix_skipped" for e in result.trace)
