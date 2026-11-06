@@ -77,7 +77,8 @@ python run.py --selftest
 python run.py --resume out/MXFP4DotProduct
 ```
 
-Opzioni utili: `--few-shot` (aggiunge un design di riferimento al prompt, utile
+Opzioni utili: `--no-few-shot` (toglie il design di riferimento dal prompt; il default lo include,
+utile
 con modelli piccoli), `--max-fix-rounds N`, `--vectors N`, `--no-static-review`.
 
 ## Output

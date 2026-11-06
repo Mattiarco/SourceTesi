@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .agents import CoderAgent, PlannerAgent, ReviewerAgent, TesterAgent
 from .config import AGENTS, Config
+from .knowledge.references import select_reference
 from .llm import LLMError, build_provider
 from .toolchain import check_path_sanity, format_tool_report, tool_report
 from .utils import ExtractedFile, Log
@@ -116,8 +117,12 @@ class Workflow:
 
         # ------------------------------------------------------------ CODER
         self.log.stage("coder", "generazione del design e del testbench…")
+        reference = select_reference(plan) if cfg.few_shot else None
+        self.few_shot_reference = reference.key if reference else None
+        if reference:
+            self.log.info(f"few-shot: riferimento {reference.key} ({reference.module})")
         try:
-            cres = coder.run(plan, compiled, few_shot=cfg.few_shot)
+            cres = coder.run(plan, compiled, reference=reference)
         except LLMError as e:
             return RunResult(False, plan, message=str(e), trace=self.trace)
         if not cres.ok:
@@ -268,6 +273,7 @@ class Workflow:
             "request": self.cfg.request,
             "config": self.cfg.to_dict(),
             "files": [f.path for f in files],
+            "few_shot_reference": getattr(self, "few_shot_reference", None),
             "llm": {role: p.meta() for role, p in self.providers.items()},
             "llm_stats": self._stats(),
             "physical": getattr(self, "_physical", {}),

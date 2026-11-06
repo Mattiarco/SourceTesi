@@ -39,7 +39,7 @@ class Config:
     outdir: Path = Path("out")
     max_fix_rounds: int = 4
     static_review: bool = True
-    few_shot: bool = False
+    few_shot: bool = True            # esempio Chisel verificato più vicino al piano
     num_random_vectors: int = 64
     seed: int = 1234                   # seed del campionamento LLM (options.seed)
     vector_seed: int = 1234            # seed dei vettori casuali: fisso fra le run di un bench

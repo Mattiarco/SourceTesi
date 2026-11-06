@@ -79,8 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("-o", "--outdir", type=Path, default=Path("out"))
     w.add_argument("--max-fix-rounds", type=int, default=4)
     w.add_argument("--no-static-review", action="store_true")
-    w.add_argument("--few-shot", action="store_true",
-                   help="includi un design di riferimento nel prompt (utile con modelli piccoli)")
+    w.add_argument("--few-shot", action=argparse.BooleanOptionalAction, default=True,
+                   help="includi il design di riferimento più vicino al piano nel prompt "
+                        "del Coder (default: sì; --no-few-shot per l'ablazione)")
     w.add_argument("--vectors", type=int, default=64, help="vettori casuali di test")
     w.add_argument("--seed", type=int, default=1234,
                    help="seed del campionamento LLM (options.seed di Ollama)")

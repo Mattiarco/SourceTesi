@@ -1,7 +1,7 @@
 """Agente CODER — implementa il piano in Chisel + testbench C++."""
 from __future__ import annotations
 
-from ..knowledge.reference_design import REFERENCE_CHISEL
+from ..knowledge.references import Reference
 from ..toolchain.testvectors import HEADER_CONTRACT
 from ..utils import extract_files
 from .base import Agent, AgentResult
@@ -30,7 +30,8 @@ class CoderAgent(Agent):
     name = "coder"
     system_prompt = SYSTEM
 
-    def run(self, plan: dict, compiled_prompt: str, few_shot: bool = False) -> AgentResult:
+    def run(self, plan: dict, compiled_prompt: str,
+            reference: Reference | None = None) -> AgentResult:
         module = plan["module_name"]
         src_path = f"src/main/scala/mxfp4/{module}.scala"
         lang = "scala"
@@ -41,9 +42,13 @@ class CoderAgent(Agent):
 
         tb_path = f"sim/tb_{module}.cpp"
         example = ""
-        if few_shot:
-            example = ("\n### ESEMPIO DI STILE ATTESO (design diverso, NON copiarlo alla lettera)\n"
-                       f"```scala\n{REFERENCE_CHISEL}```\n")
+        if reference is not None:
+            example = (f"\n### DESIGN DI RIFERIMENTO VERIFICATO ({reference.module}, "
+                       f"{reference.clocking}, kernel {reference.kernel})\n"
+                       "Compila e supera i test: riusane lo stile, gli import e le idiomatiche\n"
+                       "Chisel. Adatta nomi, porte e algoritmo al PIANO APPROVATO, che prevale\n"
+                       "sempre sull'esempio.\n"
+                       f"```scala\n{reference.scala.rstrip()}\n```\n")
 
         prompt = f"""{compiled_prompt}
 
