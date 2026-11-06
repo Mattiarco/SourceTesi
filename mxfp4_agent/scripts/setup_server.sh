@@ -43,20 +43,50 @@ log()  { printf '\033[1;34m[setup]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✔\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*"; }
 
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) ;;
-  *) warn "piattaforma $(uname -s)-$(uname -m) non testata: lo script assume Linux x86_64" ;;
+# Architettura: decide i binari scaricati (Coursier, OSS CAD Suite, Ollama).
+#   CS_ARCH    nome nell'asset di Coursier     cs-<CS_ARCH>-pc-linux.gz
+#   OSS_ARCH   nome nell'asset di OSS CAD Suite oss-cad-suite-linux-<OSS_ARCH>-AAAAMMGG.tgz
+#   OLLAMA_ARCH nome nell'archivio di Ollama   ollama-linux-<OLLAMA_ARCH>.tgz
+#   ELF_MACHINE campo e_machine dell'header ELF (per riconoscere il `cs` del repo)
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+case "${OS}-${ARCH}" in
+  Linux-x86_64|Linux-amd64)
+    CS_ARCH="x86_64"; OSS_ARCH="x64";   OLLAMA_ARCH="amd64"; ELF_MACHINE="3e00" ;;
+  Linux-aarch64|Linux-arm64)
+    CS_ARCH="aarch64"; OSS_ARCH="arm64"; OLLAMA_ARCH="arm64"; ELF_MACHINE="b700" ;;
+  *)
+    echo "piattaforma non supportata: ${OS}-${ARCH} (supportate: Linux x86_64, Linux aarch64)" >&2
+    exit 1 ;;
 esac
+log "piattaforma ${OS}-${ARCH}"
+
+# True se $1 è un eseguibile ELF a 64 bit per l'architettura di questa macchina.
+# Legge l'header direttamente (`file` spesso non è installato sui server):
+# byte 0-3 = \x7fELF, byte 4 = 02 (64 bit), byte 18-19 = e_machine little-endian.
+elf_matches_host() {
+  [[ -f "$1" ]] || return 1
+  local magic cls mach
+  magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')"
+  cls="$(od -An -tx1 -j4 -N1 "$1" 2>/dev/null | tr -d ' \n')"
+  mach="$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')"
+  [[ "${magic}" == "7f454c46" && "${cls}" == "02" && "${mach}" == "${ELF_MACHINE}" ]]
+}
 
 # ------------------------------------------------------------------ Coursier
 CS="${BIN}/cs"
+if [[ -x "${CS}" ]] && ! elf_matches_host "${CS}"; then
+  warn "Coursier in ${CS} non è per ${ARCH}: lo riscarico"
+  rm -f "${CS}"
+fi
 if [[ ! -x "${CS}" ]]; then
-  if [[ -x "${REPO}/cs" ]] && file "${REPO}/cs" 2>/dev/null | grep -q "ELF 64-bit.*x86-64"; then
-    log "Coursier: uso il binario del repo"
+  if elf_matches_host "${REPO}/cs"; then
+    log "Coursier: uso il binario del repo (${ARCH})"
     cp "${REPO}/cs" "${CS}"
   else
-    log "Coursier: download"
-    curl -fL "https://github.com/coursier/coursier/releases/latest/download/cs-x86_64-pc-linux.gz" \
+    [[ -f "${REPO}/cs" ]] && log "Coursier: il binario del repo non è per ${ARCH}, lo ignoro"
+    log "Coursier: download cs-${CS_ARCH}-pc-linux.gz"
+    curl -fL "https://github.com/coursier/coursier/releases/latest/download/cs-${CS_ARCH}-pc-linux.gz" \
       | gzip -d > "${CS}"
   fi
   chmod +x "${CS}"
@@ -80,9 +110,11 @@ ok "sbt ${SBT_VERSION} in ${BIN}"
 if [[ ! -x "${PREFIX}/oss-cad-suite/bin/yosys" ]]; then
   if [[ -z "${OSS_URL}" ]]; then
     OSS_URL="$(curl -fsSL https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest \
-      | grep -o 'https://[^"]*oss-cad-suite-linux-x64-[0-9]*\.tgz' | head -1)"
+      | grep -o "https://[^\"]*/oss-cad-suite-linux-${OSS_ARCH}-[0-9]\{8\}\.tgz" | head -1)"
   fi
-  [[ -n "${OSS_URL}" ]] || { echo "URL di OSS CAD Suite non trovato" >&2; exit 1; }
+  [[ -n "${OSS_URL}" ]] || {
+    echo "URL di OSS CAD Suite per linux-${OSS_ARCH} non trovato nell'ultima release" \
+         "(imposta OSS_CAD_SUITE_URL a mano)" >&2; exit 1; }
   log "OSS CAD Suite: ${OSS_URL}"
   tmp="$(mktemp -d)"
   curl -fL -o "${tmp}/oss.tgz" "${OSS_URL}"
@@ -124,7 +156,7 @@ if command -v ollama >/dev/null 2>&1 || curl -fsS "${OLLAMA_HOST:-http://localho
     done
   fi
 else
-  warn "Ollama non trovato. Senza sudo: scarica https://ollama.com/download/ollama-linux-amd64.tgz,"
+  warn "Ollama non trovato. Senza sudo: scarica https://ollama.com/download/ollama-linux-${OLLAMA_ARCH}.tgz,"
   warn "estrailo in ${PREFIX}/ollama e avvia '${PREFIX}/ollama/bin/ollama serve' (es. in tmux)."
 fi
 
