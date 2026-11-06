@@ -90,6 +90,9 @@ class Workflow:
         self.first_failure_stage: str | None = None
         self.round_history: list[dict] = []
         self.toolchain_seconds = 0.0
+        # causa di un'interruzione non imputabile al design (es. Ollama caduto):
+        # bench.py la conta come errore di infrastruttura, non come fallimento
+        self.aborted: str | None = None
         try:
             return self._run()
         finally:
@@ -213,6 +216,7 @@ class Workflow:
                        f"I file generati sono salvati; riprendi con "
                        f"`--resume {workdir}` quando il servizio torna disponibile.")
                 self.log.fail(msg)
+                self.aborted = "llm_unavailable"
                 self._finalize(workdir, plan, files, False, msg)
                 return RunResult(False, plan, files, workdir, rnd, msg,
                                  self.trace, self._stats())
@@ -284,6 +288,7 @@ class Workflow:
                 msg = (f"Il provider LLM è caduto durante il fix del round {rnd + 1}: {e}\n"
                        f"Riprendi con `--resume {workdir}`.")
                 self.log.fail(msg)
+                self.aborted = "llm_unavailable"
                 self._finalize(workdir, plan, files, False, msg)
                 return RunResult(False, plan, files, workdir, rnd, msg,
                                  self.trace, self._stats())
@@ -432,6 +437,7 @@ class Workflow:
             "llm_stats": self._stats(),
             "physical": getattr(self, "_physical", {}),
             "ppa": getattr(self, "ppa_history", None),
+            "aborted": getattr(self, "aborted", None),
             "trace": self.trace,
         }
         (workdir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False),
