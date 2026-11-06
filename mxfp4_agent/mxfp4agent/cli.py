@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from .config import AGENTS, Config, load_profiles
-from .llm import DEFAULT_MODELS, build_provider
-from .toolchain import ToolchainRunner, format_tool_report, tool_report
+from .llm import DEFAULT_MODELS
+from .toolchain import ToolchainRunner
 from .utils import force_utf8_stdio
 from .workflow import Workflow
 
@@ -116,29 +116,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_doctor(args) -> int:
+    from .doctor import format_checks, run_checks
+
     print(BANNER)
-    rep = tool_report()
-    print("Toolchain esterna:")
-    print(format_tool_report(rep))
-    print("\nProvider LLM:")
-    for kind in ("ollama",):
-        try:
-            prov = build_provider(kind, model=args.model, host=args.host)
-            ok, detail = prov.health_check()
-        except Exception as e:  # pragma: no cover
-            ok, detail = False, str(e)
-        print(f"  {'✔' if ok else '✘'} {kind:<8} {detail}")
-    missing = [k for k, v in rep.items() if not v and k in ("verilator", "sbt")]
-    if missing:
-        print("\nPer installare i tool mancanti:")
-        if "verilator" in missing:
-            print("  verilator : sudo apt install verilator   |  brew install verilator")
-        if "sbt" in missing:
-            print("  sbt+JDK17 : https://www.scala-sbt.org/download  (serve solo per Chisel)")
-    if not rep.get("yosys") or not rep.get("nextpnr-ecp5"):
-        print("\nOpzionali (sintesi e timing; senza, quelle fasi vengono saltate):")
-        print("  yosys + nextpnr-ecp5 : sudo apt install yosys nextpnr-ecp5   |  brew install yosys nextpnr-ecp5")
-    return 0 if not missing else 1
+    # tutti i modelli che la run userebbe: globale, per agente, profili
+    profiles = load_profiles(args.profiles) if args.profiles else {}
+    cfg = Config(model=args.model, planner_model=args.planner_model,
+                 coder_model=args.coder_model, reviewer_model=args.reviewer_model,
+                 tester_model=args.tester_model, profiles=profiles)
+    models = [cfg.agent_model(r) or DEFAULT_MODELS["ollama"] for r in AGENTS]
+    checks = run_checks(args.host, models, args.outdir)
+    print(format_checks(checks))
+    failed = [c.name for c in checks if c.required and not c.ok]
+    optional = [c.name for c in checks if not c.required and not c.ok]
+    print()
+    if failed:
+        print(f"✘ mancano componenti obbligatori: {', '.join(failed)}")
+    else:
+        print("✔ ambiente pronto per generazione e verifica")
+    if optional:
+        print(f"! facoltativi assenti (le fasi relative vengono saltate o rallentano): "
+              f"{', '.join(optional)}")
+    return 1 if failed else 0
 
 
 def cmd_resume(args) -> int:
