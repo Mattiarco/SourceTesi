@@ -5,8 +5,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm import LLMProvider, Message
-from ..utils import Log, truncate
+from ..llm import LLMError, LLMProvider, Message
+from ..utils import Log, parse_json_response, truncate
 
 
 @dataclass
@@ -48,6 +48,26 @@ class Agent:
             self.log.fail(f"{self.name}: risposta TRONCATA a {resp.output_tokens} token. "
                           f"Rilancia con --max-tokens più alto (attuale: {self.provider.max_tokens}).")
         return resp.text
+
+    def ask_json(self, prompt: str, schema: dict | None, keep_history: bool = True,
+                 **overrides: Any) -> tuple[dict | None, str, str]:
+        """Chiede un oggetto JSON con output strutturato.
+
+        Ritorna ``(dati | None, testo grezzo, errore di parsing)``. Se il server
+        rifiuta il campo `format` (Ollama < 0.5) ripiega sul testo libero.
+        """
+        try:
+            text = self.ask(prompt, keep_history, format=schema, **overrides) if schema                 else self.ask(prompt, keep_history, **overrides)
+        except LLMError as e:
+            if not schema or "format" not in str(e).lower():
+                raise
+            self.log.fail(f"{self.name}: output strutturato non supportato ({str(e)[:80]}); "
+                          "ripiego sul testo libero")
+            text = self.ask(prompt, keep_history, **overrides)
+        try:
+            return parse_json_response(text), text, ""
+        except ValueError as e:
+            return None, text, str(e)
 
     def _trim_history(self, max_turns: int = 6) -> None:
         if len(self.history) > max_turns * 2:

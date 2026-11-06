@@ -108,6 +108,23 @@ def extract_json(text: str) -> dict:
     raise ValueError("Nessun JSON valido nella risposta del modello.")
 
 
+def parse_json_response(text: str) -> dict:
+    """Parsing tollerante di una risposta che DOVREBBE essere JSON.
+
+    Con `format` (output strutturato) il testo è JSON puro; senza, o con server
+    Ollama vecchi, il modello può avvolgerlo in un fence o in prosa.
+    """
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return extract_json(text)
+
+
 def sanitize_identifier(name: str, default: str = "MXFP4Unit") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_]", "", name or "")
     if not cleaned or not (cleaned[0].isalpha() or cleaned[0] == "_"):

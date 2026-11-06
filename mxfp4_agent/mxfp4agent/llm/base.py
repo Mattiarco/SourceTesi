@@ -107,11 +107,17 @@ class LLMProvider(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def health_check(self, live: bool = True) -> tuple[bool, str]:
-        """Return (ok, human readable detail).
+    def health_check(self) -> tuple[bool, str]:
+        """Return (ok, human readable detail)."""
 
-        ``live=False`` chiede un controllo economico (nessuna chiamata a pagamento).
-        """
+    def prepare(self) -> list[str]:
+        """Interroga il backend prima della run; ritorna avvisi da mostrare."""
+        return []
+
+    def meta(self) -> dict:
+        """Descrizione riproducibile del modello e delle opzioni (per report.json)."""
+        return {"provider": self.name, "model": self.model,
+                "options": {"temperature": self.temperature, "num_predict": self.max_tokens}}
 
     def describe(self) -> str:
         return f"{self.name}:{self.model}"

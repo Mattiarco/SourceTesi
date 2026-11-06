@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import Config
+from .config import AGENTS, Config, load_profiles
 from .llm import DEFAULT_MODELS, build_provider
 from .toolchain import ToolchainRunner, format_tool_report, tool_report
 from .utils import force_utf8_stdio
@@ -19,6 +19,16 @@ BANNER = r"""
  |_|  |_|/_/\_\_|   |  __/|__   _|  Chisel/SystemVerilog + Verilator
                     |_|      |_|
 """
+
+
+def _keep_alive(v: str | None):
+    """Ollama accetta durate ("30m") o secondi interi (-1 = per sempre)."""
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return v
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--temperature", type=float, default=0.2)
     g.add_argument("--max-tokens", type=int, default=None,
                    help="budget di output (num_predict di Ollama)")
-    g.add_argument("--timeout", type=int, default=900)
+    g.add_argument("--timeout", type=int, default=1800,
+                   help="tetto totale per singola chiamata LLM, in secondi")
+    g.add_argument("--chunk-timeout", type=int, default=600,
+                   help="attesa massima fra due chunk dello stream (include il "
+                        "caricamento del modello)")
+    g.add_argument("--keep-alive", default="30m",
+                   help="per quanto Ollama tiene il modello in memoria (es. 30m, -1, 0)")
+    g.add_argument("--profiles", type=Path, metavar="JSON",
+                   help="profili per agente, es. {\"planner\": {\"model\": \"qwen2.5-coder:32b\"}}")
 
     d = p.add_argument_group("design")
     d.add_argument("--target", choices=["chisel", "systemverilog"],
@@ -66,7 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--few-shot", action="store_true",
                    help="includi un design di riferimento nel prompt (utile con modelli piccoli)")
     w.add_argument("--vectors", type=int, default=64, help="vettori casuali di test")
-    w.add_argument("--seed", type=int, default=1234)
+    w.add_argument("--seed", type=int, default=1234,
+                   help="seed del campionamento LLM (options.seed di Ollama)")
+    w.add_argument("--vector-seed", type=int, default=1234,
+                   help="seed dei vettori casuali di test (tienilo fisso fra le run)")
     w.add_argument("--no-synth", action="store_true",
                    help="salta sintesi (Yosys) e implementation con timing (nextpnr)")
     w.add_argument("--target-mhz", type=float, default=100.0,
@@ -171,12 +192,16 @@ def main(argv: list[str] | None = None) -> int:
             temperature=args.temperature,
             max_tokens=args.max_tokens,
             timeout=args.timeout,
+            chunk_timeout=args.chunk_timeout,
+            keep_alive=_keep_alive(args.keep_alive),
+            profiles=load_profiles(args.profiles) if args.profiles else {},
             outdir=args.outdir,
             max_fix_rounds=0 if args.selftest else args.max_fix_rounds,
             static_review=not args.no_static_review and not args.selftest,
             few_shot=args.few_shot,
             num_random_vectors=args.vectors,
             seed=args.seed,
+            vector_seed=args.vector_seed,
             synth=not args.no_synth,
             target_mhz=args.target_mhz,
             verbose=not args.quiet,
@@ -185,7 +210,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(BANNER)
         print(f"Richiesta : {cfg.request}")
-        print(f"Provider  : {cfg.provider} ({cfg.model or DEFAULT_MODELS.get(cfg.provider)})")
+        models = {r: cfg.agent_model(r) or DEFAULT_MODELS.get(cfg.provider) for r in AGENTS}
+        same = len(set(models.values())) == 1
+        print(f"Provider  : {cfg.provider} "
+              + (f"({models['planner']})" if same else
+                 "(" + ", ".join(f"{r}={m}" for r, m in models.items()) + ")"))
+        print(f"Seed LLM  : {cfg.seed}   seed vettori: {cfg.vector_seed}")
         print(f"Output    : {cfg.outdir.resolve()}\n")
 
     result = Workflow(cfg).run()

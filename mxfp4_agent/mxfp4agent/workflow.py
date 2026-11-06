@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agents import CoderAgent, PlannerAgent, ReviewerAgent, TesterAgent
-from .config import Config
+from .config import AGENTS, Config
 from .llm import LLMError, build_provider
 from .toolchain import check_path_sanity, format_tool_report, tool_report
 from .utils import ExtractedFile, Log
@@ -31,15 +31,19 @@ class Workflow:
         self.cfg = cfg
         self.log = Log(cfg.verbose)
         self.providers = {}
-        for role in ("planner", "coder", "reviewer", "tester"):
+        for role in AGENTS:
+            s = cfg.agent_settings(role)
             self.providers[role] = build_provider(
                 cfg.provider,
-                model=cfg.agent_model(role),
+                model=s["model"],
                 host=cfg.host,
-                num_ctx=cfg.num_ctx,
-                temperature=cfg.temperature,
-                max_tokens=cfg.max_tokens,
+                num_ctx=s["num_ctx"],
+                temperature=s["temperature"],
+                max_tokens=s["max_tokens"],
+                seed=s["seed"],
+                keep_alive=s["keep_alive"],
                 timeout=cfg.timeout,
+                chunk_timeout=cfg.chunk_timeout,
             )
         self.trace: list[dict] = []
         for role, prov in self.providers.items():
@@ -52,8 +56,22 @@ class Workflow:
                            "event": event, **kw})
 
     def preflight(self) -> tuple[bool, str]:
-        ok, detail = self.providers["planner"].health_check(live=False)
+        # Ogni agente può usare un modello diverso: vanno controllati tutti,
+        # altrimenti un modello mancante emerge solo dopo minuti di lavoro.
+        ok, detail = True, ""
+        for role, prov in self.providers.items():
+            r_ok, r_detail = prov.health_check()
+            if not r_ok:
+                return False, f"{role}: {r_detail}"
+            detail = r_detail
+            for note in prov.prepare():
+                self.log.fail(f"{role}: {note}")
         self.log.stage("system", f"LLM: {detail}")
+        for role, prov in self.providers.items():
+            m = prov.meta()
+            self.log.info(f"{role:<8} {m.get('model')} digest={str(m.get('digest'))[:12]} "
+                          f"ctx={m.get('options', {}).get('num_ctx')} "
+                          f"seed={m.get('options', {}).get('seed')}")
         rep = tool_report()
         self.log.info("toolchain:\n" + format_tool_report(rep))
         for warn in check_path_sanity(self.cfg.outdir):
@@ -145,7 +163,7 @@ class Workflow:
         for rnd in range(cfg.max_fix_rounds + 1):
             self.log.stage("tester", f"round {rnd}: scrittura progetto ed esecuzione toolchain…")
             try:
-                tres = tester.run(plan, files, cfg.num_random_vectors, cfg.seed, round_id=rnd)
+                tres = tester.run(plan, files, cfg.num_random_vectors, cfg.vector_seed, round_id=rnd)
             except LLMError as e:
                 msg = (f"Il provider LLM è caduto durante il round {rnd}: {e}\n"
                        f"I file generati sono salvati; riprendi con "
@@ -250,6 +268,7 @@ class Workflow:
             "request": self.cfg.request,
             "config": self.cfg.to_dict(),
             "files": [f.path for f in files],
+            "llm": {role: p.meta() for role, p in self.providers.items()},
             "llm_stats": self._stats(),
             "physical": getattr(self, "_physical", {}),
             "trace": self.trace,

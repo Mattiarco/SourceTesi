@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from ..knowledge import full_context
 from ..knowledge.mxfp4_spec import MXFP4_SPEC
-from ..utils import extract_json, sanitize_identifier
+from ..utils import sanitize_identifier
 from .base import Agent, AgentResult
+from .schemas import PLAN_SCHEMA
 
 SYSTEM = """Sei il PLANNER di un sistema agentico per Meta-HDL, specializzato in unita'
 aritmetiche in formato microscaling MXFP4 destinate a un coprocessore RISC-V.
@@ -20,8 +21,7 @@ completa e non ambigua, tale che un secondo agente possa implementarla senza
 dover indovinare nulla: nomi, larghezze, semantica di ogni porta, latenza,
 algoritmo passo-passo, casi limite.
 
-Rispondi SEMPRE e SOLO con un singolo oggetto JSON in un blocco ```json.
-Nessun testo prima o dopo.
+Rispondi SEMPRE e SOLO con un singolo oggetto JSON, senza testo prima o dopo.
 
 Schema richiesto:
 {
@@ -76,13 +76,11 @@ Produci ora il piano JSON."""
 
         last_err = ""
         for attempt in range(self.max_parse_retries + 1):
-            text = self.ask(prompt if attempt == 0 else
-                            f"Il tuo output non era JSON valido ({last_err}). "
-                            "Rispondi SOLO con il blocco ```json richiesto.")
-            try:
-                plan = extract_json(text)
-            except ValueError as e:
-                last_err = str(e)
+            plan, text, last_err = self.ask_json(
+                prompt if attempt == 0 else
+                f"Il tuo output non era JSON valido ({last_err}). "
+                "Rispondi SOLO con l'oggetto JSON richiesto.", PLAN_SCHEMA)
+            if plan is None:
                 self.log.fail(f"planner: JSON non valido (tentativo {attempt + 1})")
                 continue
             plan = self._normalize(plan, block_size, target_hint)

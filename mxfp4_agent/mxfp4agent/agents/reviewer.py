@@ -9,15 +9,16 @@ from __future__ import annotations
 
 from ..knowledge import full_context
 from ..toolchain.testvectors import HEADER_CONTRACT
-from ..utils import ExtractedFile, extract_files, extract_json, truncate
+from ..utils import ExtractedFile, extract_files, truncate
 from .base import Agent, AgentResult
+from .schemas import REVIEW_SCHEMA
 
 SYSTEM = """Sei il REVIEWER & FIXER di un sistema agentico per Meta-HDL, esperto di
 Chisel, SystemVerilog, Verilator e formati microscaling (MXFP4/NVFP4).
 
 Hai due modalita', indicate dal prompt:
 
-[REVIEW] Ispezione statica. Rispondi SOLO con un blocco ```json:
+[REVIEW] Ispezione statica. Rispondi SOLO con un oggetto JSON:
 {
   "verdict": "approved" | "changes_required",
   "issues": [{"severity": "blocker"|"major"|"minor",
@@ -65,10 +66,8 @@ class ReviewerAgent(Agent):
 {self._dump(files)}
 
 Emetti il JSON di review."""
-        text = self.ask(prompt, keep_history=False)
-        try:
-            data = extract_json(text)
-        except ValueError:
+        data, text, _err = self.ask_json(prompt, REVIEW_SCHEMA, keep_history=False)
+        if data is None:
             return AgentResult(True, {"verdict": "approved", "issues": []}, text,
                                "review non parsabile, proseguo")
         return AgentResult(True, data, text)

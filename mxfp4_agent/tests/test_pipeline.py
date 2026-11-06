@@ -192,7 +192,7 @@ def test_truncated_response_is_flagged(capsys=None):
             return LLMResponse("meta file", self.model, self.name, 10, 99,
                                stop_reason="max_tokens")
 
-        def health_check(self, live=True):
+        def health_check(self):
             return True, "ok"
 
     warnings = []
