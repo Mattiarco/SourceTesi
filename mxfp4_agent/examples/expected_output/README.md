@@ -1,4 +1,4 @@
-# Output atteso — tre esempi di riferimento
+# Output atteso — quattro esempi di riferimento
 
 Questi sono i deliverable che la pipeline **deve** produrre: per ogni esempio il
 piano del Planner, il modulo Chisel del Coder e il testbench Verilator, cioè
@@ -13,8 +13,35 @@ MXFP4.
 | 1 | `MXFP4DotProduct` | combinatorio | `dot_product` | accumulo intero esatto, caso base |
 | 2 | `MXFP4DotProductPipe` | sequenziale, 2 stadi | `dot_product` | pipeline, `valid`, reset, throughput 1/ciclo |
 | 3 | `MXFP4ElemMul` | combinatorio | `elementwise_mul` | conversione esatta MXFP4 → IEEE-754 FP32 |
+| 4 | `MXFP4ToBF16` | combinatorio | `to_bf16` | conversione MXFP4 → bfloat16 senza moltiplicatori: subnormali, overflow → ±inf, NaN |
 
 ## Stato di verifica
+
+### Con il testbench generato dal contratto (pipeline attuale)
+
+Dal punto 3 della pipeline il testbench non è più scritto a mano né dall'LLM:
+`mxfp4agent/toolchain/tbgen.py` lo genera dal contratto delle porte
+(`knowledge/contracts.py`). I quattro design, verificati con Verilator 5.055
+(OSS CAD Suite) e i vettori del golden model:
+
+```
+01 dot-product   : TEST PASSED (26 vectors)   coverage 90.3 %
+02 pipelined     : TEST PASSED (26 vectors)   coverage 90.9 %
+03 element-wise  : TEST PASSED (92 vectors)   coverage 97.2 %   (esaustivo: 256 coppie x 8 coppie di scale)
+04 to-bf16       : TEST PASSED (282 vectors)  coverage 98.4 %   (esaustivo: 16 codici x 256 scale)
+```
+
+Controprova con il testbench generato:
+
+| design | bug iniettato | esito |
+|---|---|---|
+| 01 | subnormale 0.5 trattato come zero | catturato su `all_subnormal` (atteso 32, ottenuto 0) |
+| 02 | piano con latenza 3, design con latenza 2 | catturato: "latenza 2 cicli, attesa 3" |
+| 02 | `validOut` mai alzato | catturato: "usciti 0 risultati su 26" |
+| 03 | bias dell'esponente FP32 sfasato di 1 | catturato: atteso 0x3f800000, ottenuto 0x40000000 |
+| 04 | overflow saturato al massimo finito invece di inf | catturato su scala 253/254: atteso 0x7f80, ottenuto 0x7f7f |
+
+### Con i testbench scritti a mano (versione originale)
 
 I tre testbench compilano con `g++ -Wall -Wextra` **senza un solo warning** e
 passano tutti i 58 vettori del golden model, confrontati contro

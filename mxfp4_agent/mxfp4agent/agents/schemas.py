@@ -45,7 +45,8 @@ PLAN_SCHEMA = {
             "required": ["accumulator_width", "rounding"]},
         "test_plan": {"type": "object", "properties": {
             "kernel": {"type": "string",
-                       "enum": ["dot_product", "elementwise_mul", "elementwise_add", "custom"]},
+                       "enum": ["dot_product", "elementwise_mul", "elementwise_add", "to_bf16",
+                                "custom"]},
             "num_random": _INT,
             "directed": {"type": "array", "items": _STR}},
             "required": ["kernel"]},

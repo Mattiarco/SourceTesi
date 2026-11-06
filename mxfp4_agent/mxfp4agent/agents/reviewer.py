@@ -11,6 +11,7 @@ from ..knowledge import full_context
 from ..toolchain.testvectors import HEADER_CONTRACT
 from ..utils import ExtractedFile, extract_files, truncate
 from .base import Agent, AgentResult
+from .coder import TEMPLATE_TB_NOTE, template_testbench
 from .schemas import REVIEW_SCHEMA
 
 SYSTEM = """Sei il REVIEWER & FIXER di un sistema agentico per Meta-HDL, esperto di
@@ -55,12 +56,12 @@ class ReviewerAgent(Agent):
     def review(self, plan: dict, files: list[ExtractedFile]) -> AgentResult:
         prompt = f"""[REVIEW]
 
-{full_context()}
+{full_context(not template_testbench(plan))}
 
 ### PIANO
 {self._fmt_json({k: v for k, v in plan.items() if k != 'coder_prompt'}, 3000)}
 
-{HEADER_CONTRACT}
+{self._tb_section(plan)}
 
 ### CODICE DA REVISIONARE
 {self._dump(files)}
@@ -96,9 +97,9 @@ Emetti il JSON di review."""
 
         prompt = f"""[FIX] Tentativo {attempt}. Fase fallita: **{stage}**.
 
-{full_context()}
+{full_context(not template_testbench(plan))}
 
-{HEADER_CONTRACT}
+{self._tb_section(plan)}
 {issue_txt}{history_txt}
 
 ### LOG DI ERRORE ({stage})
@@ -116,10 +117,25 @@ Diagnostica la causa e riemetti i file corretti per intero."""
         cause = self._cause(text)
         if not new_files:
             return AgentResult(False, files, text, f"Nessun file riemesso. {cause}")
+        if template_testbench(plan):
+            # il testbench è rigenerato dal contratto: una versione del modello
+            # verrebbe comunque sovrascritta, e confonderebbe i round successivi
+            new_files = [f for f in new_files if f.ext not in (".cpp", ".cc", ".h")]
+            if not new_files:
+                return AgentResult(False, files, text,
+                                   f"Il Fixer ha riemesso solo il testbench (generato, non "
+                                   f"modificabile). {cause}")
         merged = self._merge(files, new_files)
         return AgentResult(True, merged, text, cause)
 
     # ------------------------------------------------------------- helpers
+    @staticmethod
+    def _tb_section(plan: dict) -> str:
+        if template_testbench(plan):
+            return (TEMPLATE_TB_NOTE + "\nSe la simulazione fallisce, il difetto e' nel "
+                    "modulo Chisel: il testbench e i valori attesi sono corretti per costruzione.")
+        return HEADER_CONTRACT
+
     @staticmethod
     def _cause(text: str) -> str:
         for line in text.splitlines():

@@ -41,6 +41,9 @@ class Config:
     static_review: bool = True
     chisel_lint: bool = True         # lint statico deterministico prima di sbt
     sbt_mode: str = "auto"           # auto | client (server sbt riusato) | batch
+    tb_mode: str = "template"        # template (da contratto) | llm
+    trace: bool = False              # dump VCD della simulazione
+    coverage: bool = False           # coverage Verilator nel report
     few_shot: bool = True            # esempio Chisel verificato più vicino al piano
     num_random_vectors: int = 64
     seed: int = 1234                   # seed del campionamento LLM (options.seed)

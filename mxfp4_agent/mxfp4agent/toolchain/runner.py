@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,31 @@ def _looks_like_build_error(r: CmdResult) -> bool:
                           r"Nonzero exit code|FirtoolNonZeroExitCode", out))
 
 
+def summarize_coverage(dat: str) -> dict:
+    """Riepilogo di un `coverage.dat` di Verilator per tipo di punto.
+
+    Ogni riga è ``C '<chiavi>' <conteggio>``; le chiavi sono coppie separate
+    da \\x01 (chiave) e \\x02 (valore). `page` vale ad es. ``v_line/Mod``,
+    ``v_toggle/Mod``, ``v_branch/Mod``: il tipo è la parte prima della barra.
+    """
+    per: dict[str, list[int]] = {}
+    for line in dat.splitlines():
+        m = re.match(r"C '(.*)' (\d+)\s*$", line)
+        if not m:
+            continue
+        fields = dict(kv.split("\x02", 1) for kv in m.group(1).split("\x01") if "\x02" in kv)
+        kind = fields.get("page", "v_other").split("/", 1)[0].removeprefix("v_") or "other"
+        hit = per.setdefault(kind, [0, 0])
+        hit[1] += 1
+        hit[0] += int(m.group(2)) > 0
+    out = {kind: {"covered": c, "total": t, "percent": round(100.0 * c / t, 1) if t else 0.0}
+           for kind, (c, t) in sorted(per.items())}
+    tot_c, tot_t = sum(c for c, _ in per.values()), sum(t for _, t in per.values())
+    out["all"] = {"covered": tot_c, "total": tot_t,
+                  "percent": round(100.0 * tot_c / tot_t, 1) if tot_t else 0.0}
+    return out
+
+
 def shutdown_sbt_server(root: Path, timeout: int = 60) -> bool:
     """Chiude il server sbt avviato da `sbt --client` nel progetto, se c'è.
 
@@ -34,9 +60,17 @@ def shutdown_sbt_server(root: Path, timeout: int = 60) -> bool:
     di benchmark la macchina finirebbe la RAM.
     """
     root = Path(root).resolve()
-    if not (root / "project" / "target" / "active.json").exists() or not which("sbt"):
+    active = root / "project" / "target" / "active.json"
+    if not active.exists() or not which("sbt"):
         return False
-    return run(["sbt", "--client", "shutdown"], cwd=root, timeout=timeout).ok
+    ok = run(["sbt", "--client", "shutdown"], cwd=root, timeout=timeout).ok
+    # La chiusura è asincrona: se nel frattempo si ricrea il progetto nella
+    # stessa cartella, un nuovo client può agganciarsi al server morente e
+    # restare appeso. Si attende che il server rimuova active.json.
+    deadline = time.time() + 20
+    while active.exists() and time.time() < deadline:
+        time.sleep(0.25)
+    return ok
 
 
 @dataclass
@@ -107,9 +141,12 @@ class ToolchainRunner:
                  sbt_timeout: int = 1800, verilator_timeout: int = 900,
                  sim_timeout: int = 300, synth: bool = True,
                  target_mhz: float = 100.0, synth_timeout: int = 900,
-                 sbt_mode: str = "auto", sbt_client_timeout: int = 420) -> None:
+                 sbt_mode: str = "auto", sbt_client_timeout: int = 420,
+                 trace: bool = False, coverage: bool = False) -> None:
         self.sbt_mode = sbt_mode
         self.sbt_client_timeout = sbt_client_timeout
+        self.trace = trace            # dump VCD in sim/waves.vcd
+        self.coverage = coverage      # coverage Verilator in sim/coverage.dat
         # SEMPRE assoluto: i comandi girano con cwd=self.root, quindi un path
         # relativo verrebbe risolto due volte ("out/X/out/X/rtl/...") e Verilator
         # non troverebbe l'RTL appena generato.
@@ -230,6 +267,8 @@ class ToolchainRunner:
                "-Wno-DECLFILENAME", "-Wno-UNUSEDSIGNAL", "--top-module", self.module,
                "--Mdir", str(self.obj_dir), "-o", f"sim_{self.module}",
                "-CFLAGS", f"-I{self.sim_dir} -O2",
+               *(["--trace"] if self.trace else []),
+               *(["--coverage"] if self.coverage else []),
                *[str(f) for f in files], str(tb)]
         r = run(cmd, cwd=self.root, timeout=self.verilator_timeout)
         exe = self.obj_dir / f"sim_{self.module}"
@@ -241,16 +280,23 @@ class ToolchainRunner:
         exe = self.obj_dir / f"sim_{self.module}"
         if not exe.exists():
             return StageResult("simulate", False, f"Eseguibile assente: {exe}", skipped=True)
+        cov_file = self.sim_dir / "coverage.dat"
+        cov_file.unlink(missing_ok=True)
         r = run([str(exe)], cwd=self.root, timeout=self.sim_timeout)
         out = r.stdout + r.stderr
         m_pass, m_fail = PASS_RE.search(out), FAIL_RE.search(out)
+        extra: dict = {}
+        if self.coverage and cov_file.exists():
+            extra["coverage"] = summarize_coverage(cov_file.read_text(errors="replace"))
+        if self.trace and (self.sim_dir / "waves.vcd").exists():
+            extra["vcd"] = str(self.sim_dir / "waves.vcd")
         if m_pass and not m_fail:
             return StageResult("simulate", True, r.log,
-                               detail={"passed": int(m_pass.group(1)), "failed": 0})
+                               detail={"passed": int(m_pass.group(1)), "failed": 0, **extra})
         if m_fail:
             return StageResult("simulate", False, r.log,
                                detail={"failed": int(m_fail.group(1)),
-                                       "total": int(m_fail.group(2))})
+                                       "total": int(m_fail.group(2)), **extra})
         return StageResult("simulate", False,
                            r.log + "\n\n[runner] Nessuna riga TEST PASSED/FAILED trovata.")
 

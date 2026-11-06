@@ -454,3 +454,15 @@ def test_ansi_codes_are_stripped():
     from mxfp4agent.toolchain.runner import strip_ansi
 
     assert strip_ansi("\x1b[31m[error]\x1b[0m Foo.scala:1:2: x") == "[error] Foo.scala:1:2: x"
+
+
+def test_timeout_output_is_text_not_bytes():
+    """TimeoutExpired porta bytes anche con text=True: il runner deve ricevere str."""
+    import sys as _sys
+
+    from mxfp4agent.toolchain.shell import run as _run
+
+    r = _run([_sys.executable, "-c", "import time; print('inizio', flush=True); time.sleep(5)"],
+             timeout=1)
+    assert r.timed_out and isinstance(r.stdout, str) and isinstance(r.stderr, str)
+    assert "TIMEOUT" in r.log

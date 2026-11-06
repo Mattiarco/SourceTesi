@@ -82,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--sbt-mode", choices=["auto", "client", "batch"], default="auto",
                    help="client: server sbt riusato fra i round (veloce); batch: una JVM per "
                         "round; auto: client su Linux/macOS, batch su Windows")
+    w.add_argument("--tb", choices=["template", "llm"], default="template", dest="tb_mode",
+                   help="template: testbench generato dal contratto delle porte (default); "
+                        "llm: scritto dal Coder")
+    w.add_argument("--trace", action="store_true", help="dump VCD in sim/waves.vcd")
+    w.add_argument("--coverage", action="store_true",
+                   help="coverage Verilator (riepilogo in report.json)")
     w.add_argument("--no-lint", action="store_true",
                    help="disattiva il lint Chisel statico (per ablazione)")
     w.add_argument("--few-shot", action=argparse.BooleanOptionalAction, default=True,
@@ -204,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
             static_review=not args.no_static_review and not args.selftest,
             chisel_lint=not args.no_lint,
             sbt_mode=args.sbt_mode,
+            tb_mode=args.tb_mode,
+            trace=args.trace,
+            coverage=args.coverage,
             few_shot=args.few_shot,
             num_random_vectors=args.vectors,
             seed=args.seed,

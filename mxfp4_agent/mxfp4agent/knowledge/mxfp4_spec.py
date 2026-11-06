@@ -190,7 +190,14 @@ COMMON_PITFALLS = r"""
 """
 
 
-def full_context() -> str:
-    """Blocco di conoscenza completo da iniettare nei prompt (il Meta-HDL è Chisel)."""
-    return "\n".join([MXFP4_SPEC, CHISEL_RULES, VERILATOR_TB_RULES, CHISEL_TB_PORTS,
-                      COMMON_PITFALLS])
+def full_context(llm_testbench: bool = True) -> str:
+    """Blocco di conoscenza da iniettare nei prompt (il Meta-HDL è Chisel).
+
+    Con il testbench generato da template le regole sul testbench C++ sono
+    inutili e consumano finestra di contesto: si omettono.
+    """
+    parts = [MXFP4_SPEC, CHISEL_RULES]
+    if llm_testbench:
+        parts += [VERILATOR_TB_RULES, CHISEL_TB_PORTS]
+    parts.append(COMMON_PITFALLS)
+    return "\n".join(parts)

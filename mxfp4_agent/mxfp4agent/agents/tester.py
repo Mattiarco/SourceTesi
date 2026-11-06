@@ -12,6 +12,7 @@ from ..toolchain import ToolchainReport, ToolchainRunner, scaffold, write_header
 from ..toolchain.chisel_lint import lint_chisel
 from ..toolchain.errsum import summarize_errors
 from ..toolchain.stage import StageResult
+from ..toolchain.tbgen import render_testbench
 from ..toolchain.testvectors import HEADER_NAME
 from ..utils import ExtractedFile, truncate
 from .base import Agent, AgentResult
@@ -44,20 +45,34 @@ class TesterAgent(Agent):
 
     def __init__(self, provider, log, workdir: Path, synth: bool = True,
                  target_mhz: float = 100.0, lint: bool = True,
-                 sbt_mode: str = "auto", **kw) -> None:
+                 sbt_mode: str = "auto", trace: bool = False, coverage: bool = False,
+                 **kw) -> None:
         super().__init__(provider, log, **kw)
         self.workdir = Path(workdir)
         self.synth = synth
         self.target_mhz = target_mhz
         self.lint = lint
         self.sbt_mode = sbt_mode
+        self.trace = trace
+        self.coverage = coverage
 
     # ------------------------------------------------------------ filesystem
     def materialize(self, plan: dict, files: list[ExtractedFile],
                     num_random: int = 64, seed: int = 1234) -> int:
         """Scrive scaffold + file generati + header dei vettori. Ritorna #vettori."""
         scaffold(self.workdir, plan["module_name"])
+        if plan.get("testbench") == "template":
+            # testbench deterministico: si rimuove ogni .cpp precedente (es. di un
+            # round con testbench LLM) e si scrive quello generato dal contratto
+            sim = self.workdir / "sim"
+            sim.mkdir(parents=True, exist_ok=True)
+            for old in sim.glob("*.cpp"):
+                old.unlink()
+            (sim / f"tb_{plan['module_name']}.cpp").write_text(render_testbench(plan),
+                                                               encoding="utf-8")
         for f in files:
+            if plan.get("testbench") == "template" and f.ext in (".cpp", ".cc"):
+                continue
             p = self.workdir / f.path
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(f.content, encoding="utf-8")
@@ -80,7 +95,8 @@ class TesterAgent(Agent):
                       pre: list[StageResult] | None = None) -> ToolchainReport:
         runner = ToolchainRunner(self.workdir, plan["module_name"],
                                  synth=self.synth, target_mhz=self.target_mhz,
-                                 sbt_mode=self.sbt_mode)
+                                 sbt_mode=self.sbt_mode, trace=self.trace,
+                                 coverage=self.coverage)
         rep = runner.run_all()
         rep.stages[0:0] = pre or []
         self._write_logs(rep, round_id)

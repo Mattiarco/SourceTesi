@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .agents import CoderAgent, PlannerAgent, ReviewerAgent, TesterAgent
 from .config import AGENTS, Config
+from .knowledge.contracts import has_contract
 from .knowledge.references import select_reference
 from .llm import LLMError, build_provider
 from .toolchain import check_path_sanity, format_tool_report, tool_report
@@ -111,6 +112,15 @@ class Workflow:
             self._t("planner", "failed", note=pres.notes)
             return RunResult(False, message=pres.notes, trace=self.trace)
         plan = pres.payload
+        # Testbench: generato dal contratto quando il kernel ne ha uno (default),
+        # altrimenti scritto dall'LLM come prima.
+        tb_template = cfg.tb_mode == "template" and has_contract(plan["test_plan"]["kernel"])
+        plan["testbench"] = "template" if tb_template else "llm"
+        if cfg.tb_mode == "template" and not tb_template:
+            self.log.info("kernel senza contratto di porte: testbench scritto dall'LLM")
+        if plan.get("ports_overridden"):
+            self.log.info("porte imposte dal contratto (il piano proponeva diversamente): "
+                          + ", ".join(plan["ports_overridden"]))
         self.log.ok(f"{plan['module_name']} "
                     f"({plan['clocking']}, K={plan['block_size']})")
         self.log.info(f"kernel di test: {plan['test_plan']['kernel']}")
@@ -120,7 +130,8 @@ class Workflow:
         self._workdir = workdir
         tester = TesterAgent(self.providers["tester"], self.log, workdir,
                              synth=cfg.synth, target_mhz=cfg.target_mhz,
-                             lint=cfg.chisel_lint, sbt_mode=cfg.sbt_mode)
+                             lint=cfg.chisel_lint, sbt_mode=cfg.sbt_mode,
+                             trace=cfg.trace, coverage=cfg.coverage)
 
         compiled = PlannerAgent.compile_coder_prompt(plan, cfg.request)
         workdir.mkdir(parents=True, exist_ok=True)
