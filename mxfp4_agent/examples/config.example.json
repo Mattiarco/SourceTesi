@@ -3,11 +3,11 @@
   "target": "chisel",
   "block_size": 32,
 
-  "provider": "claude",
-  "model": "claude-sonnet-5",
-  "planner_model": "claude-opus-5",
+  "provider": "ollama",
+  "model": "qwen2.5-coder:14b",
+  "planner_model": "qwen2.5-coder:32b",
   "temperature": 0.15,
-  "max_tokens": 12000,
+  "max_tokens": 4096,
   "timeout": 900,
 
   "outdir": "out",
@@ -16,6 +16,5 @@
   "few_shot": false,
   "num_random_vectors": 128,
   "seed": 1234,
-  "keep_going": false,
   "verbose": true
 }

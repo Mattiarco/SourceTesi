@@ -37,7 +37,6 @@ class Workflow:
                 model=cfg.agent_model(role),
                 host=cfg.host,
                 num_ctx=cfg.num_ctx,
-                api_key=cfg.api_key,
                 temperature=cfg.temperature,
                 max_tokens=cfg.max_tokens,
                 timeout=cfg.timeout,
@@ -53,8 +52,6 @@ class Workflow:
                            "event": event, **kw})
 
     def preflight(self) -> tuple[bool, str]:
-        # live=False: la vera prova è la chiamata del Planner subito dopo, che
-        # riporta comunque l'errore HTTP. Evitiamo una chiamata a pagamento in più.
         ok, detail = self.providers["planner"].health_check(live=False)
         self.log.stage("system", f"LLM: {detail}")
         rep = tool_report()

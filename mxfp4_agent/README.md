@@ -33,7 +33,7 @@ Niente moltiplicatori FP, niente arrotondamento.
 ## Installazione
 
 ```bash
-python -m pip install -r requirements.txt      # opzionale: solo pytest e anthropic
+python -m pip install -r requirements.txt      # opzionale: solo pytest
 ```
 
 Il core non ha dipendenze esterne obbligatorie (usa `urllib`).
@@ -45,11 +45,10 @@ Il core non ha dipendenze esterne obbligatorie (usa `urllib`).
 | `verilator` | simulazione | `apt install verilator` / `brew install verilator` |
 | `sbt` + JDK 17 | Chisel → SystemVerilog | <https://www.scala-sbt.org/download> |
 
-**LLM** — uno dei due:
+**LLM** — Ollama locale:
 
 ```bash
-ollama pull qwen2.5-coder:14b        # locale
-export ANTHROPIC_API_KEY=sk-ant-...  # Claude
+ollama pull qwen2.5-coder:14b
 ```
 
 Controlla tutto con:
@@ -63,9 +62,6 @@ python run.py --doctor
 ```bash
 # Ollama locale (default)
 python run.py "unità dot-product MXFP4 a 32 elementi, combinatoria"
-
-# Claude API
-python run.py "MAC MXFP4 pipelined a 2 stadi, uscita FP32" --provider claude
 
 # forzare il Meta-HDL e la dimensione del blocco
 python run.py "moltiplicatore element-wise MXFP4" --target systemverilog -k 32

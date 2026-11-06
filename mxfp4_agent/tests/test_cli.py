@@ -19,3 +19,13 @@ def test_utf8_output_survives_a_legacy_codepage():
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env)
     assert p.returncode == 0, p.stderr.decode("utf-8", "replace")
     assert "✔" in p.stdout.decode("utf-8")
+
+
+def test_parser_offers_only_local_providers():
+    sys.path.insert(0, str(ROOT))
+    from mxfp4agent.cli import build_parser
+
+    p = build_parser()
+    action = next(a for a in p._actions if a.dest == "provider")
+    assert set(action.choices) == {"ollama", "mock"}
+    assert not any(a.dest == "api_key" for a in p._actions)

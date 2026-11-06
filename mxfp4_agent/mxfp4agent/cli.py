@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""esempi:
   mxfp4-agent "unità dot-product MXFP4 a 32 elementi, combinatoria"
-  mxfp4-agent "MAC MXFP4 pipelined a 2 stadi con accumulo FP32" --provider claude
+  mxfp4-agent "MAC MXFP4 pipelined a 2 stadi con accumulo FP32" --coder-model qwen2.5-coder:32b
   mxfp4-agent "moltiplicatore element-wise MXFP4" --target systemverilog
   mxfp4-agent --doctor                 # verifica ambiente
   mxfp4-agent --selftest               # smoke test offline (provider mock)
@@ -38,7 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--request-file", type=Path, help="leggi la richiesta da file")
 
     g = p.add_argument_group("LLM")
-    g.add_argument("--provider", choices=["ollama", "claude", "mock"], default="ollama")
+    g.add_argument("--provider", choices=["ollama", "mock"], default="ollama",
+                   help="mock = risposte fisse offline, solo per test")
     g.add_argument("--model", help=f"default: {DEFAULT_MODELS}")
     g.add_argument("--planner-model")
     g.add_argument("--coder-model")
@@ -48,11 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--num-ctx", type=int, default=32768,
                    help="finestra di contesto Ollama (abbassala se il modello va in "
                         "swap o esaurisce la VRAM)")
-    g.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
     g.add_argument("--temperature", type=float, default=0.2)
     g.add_argument("--max-tokens", type=int, default=None,
-                   help="budget di output; default per provider (claude: 32000, "
-                        "perché l'extended thinking consuma max_tokens)")
+                   help="budget di output (num_predict di Ollama)")
     g.add_argument("--timeout", type=int, default=900)
 
     d = p.add_argument_group("design")
@@ -91,9 +90,9 @@ def cmd_doctor(args) -> int:
     print("Toolchain esterna:")
     print(format_tool_report(rep))
     print("\nProvider LLM:")
-    for kind in ("ollama", "claude", "mock"):
+    for kind in ("ollama",):
         try:
-            prov = build_provider(kind, model=args.model, host=args.host, api_key=args.api_key)
+            prov = build_provider(kind, model=args.model, host=args.host)
             ok, detail = prov.health_check()
         except Exception as e:  # pragma: no cover
             ok, detail = False, str(e)
@@ -169,7 +168,6 @@ def main(argv: list[str] | None = None) -> int:
             tester_model=args.tester_model,
             host=args.host,
             num_ctx=args.num_ctx,
-            api_key=args.api_key,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
             timeout=args.timeout,

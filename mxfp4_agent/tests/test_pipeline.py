@@ -137,94 +137,11 @@ def test_reviewer_never_overwrites_golden_header():
     assert merged[0].content == "GOLDEN"
 
 
-# -------------------------------------------------------- provider Anthropic
-def test_anthropic_retries_without_temperature():
-    """Alcuni modelli rifiutano `temperature`: il provider deve accorgersene e riprovare."""
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError, LLMResponse
-
-    AnthropicProvider._temperature_blocked.discard("claude-sonnet-5")
-    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
-    seen = []
-
-    def fake_call(body):
-        seen.append(dict(body))
-        if "temperature" in body:
-            raise LLMError('Anthropic HTTP 400: {"message":"`temperature` is deprecated '
-                           'for this model."}')
-        return LLMResponse("ok", body["model"], "claude", 1, 1)
-
-    prov._call = fake_call
-    assert prov.complete("sys", "ciao") == "ok"
-    assert len(seen) == 2 and "temperature" in seen[0] and "temperature" not in seen[1]
-    # la disattivazione è persistente: niente 400 inutili nelle chiamate seguenti
-    assert prov.send_temperature is False
-    prov.complete("sys", "ancora")
-    assert len(seen) == 3 and "temperature" not in seen[2]
+# ------------------------------------------------------------ robustezza LLM
 
 
-def test_temperature_discovery_is_shared_across_agents():
-    """Ogni agente ha il proprio provider: il 400 va pagato una volta sola."""
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError, LLMResponse
-
-    AnthropicProvider._temperature_blocked.discard("claude-sonnet-5")
-    calls = []
-
-    def make():
-        p = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
-
-        def fake(body):
-            calls.append("temperature" in body)
-            if "temperature" in body:
-                raise LLMError('HTTP 400: "`temperature` is deprecated for this model."')
-            return LLMResponse("ok", body["model"], "claude", 1, 1)
-
-        p._call = fake
-        return p
-
-    make().complete("s", "planner")     # scopre il problema: 2 chiamate
-    make().complete("s", "coder")       # deve saperlo già: 1 chiamata
-    make().complete("s", "reviewer")    # idem
-    assert calls == [True, False, False, False], calls
 
 
-def test_transient_errors_are_retried_and_fatal_ones_are_not():
-    """Un 529 'Overloaded' non deve buttare via minuti di lavoro degli agenti."""
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError, LLMResponse
-
-    AnthropicProvider._temperature_blocked.add("claude-sonnet-5")
-    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test",
-                             max_retries=3, retry_backoff=0.0)
-    assert prov.is_transient(LLMError('Anthropic HTTP 529: {"message":"Overloaded"}'))
-    assert prov.is_transient(LLMError("Anthropic HTTP 429: rate_limit"))
-    assert not prov.is_transient(LLMError("Anthropic HTTP 401: authentication_error"))
-    assert not prov.is_transient(LLMError("Anthropic HTTP 400: invalid_request"))
-
-    n = {"i": 0}
-    notes = []
-
-    def flaky(body):
-        n["i"] += 1
-        if n["i"] < 3:
-            raise LLMError('Anthropic HTTP 529: {"message":"Overloaded"}')
-        return LLMResponse("finalmente", body["model"], "claude", 1, 1)
-
-    prov._call = flaky
-    prov.on_retry = notes.append
-    assert prov.complete("s", "u") == "finalmente"
-    assert n["i"] == 3 and len(notes) == 2
-    assert prov.stats["retries"] == 2
-
-    # un errore fatale non viene ritentato
-    prov._call = lambda body: (_ for _ in ()).throw(LLMError("Anthropic HTTP 401: bad key"))
-    try:
-        prov.complete("s", "u")
-    except LLMError:
-        pass
-    else:
-        raise AssertionError("il 401 doveva propagarsi subito")
 
 
 def test_static_review_failure_does_not_kill_the_run(tmp_path):
@@ -235,7 +152,7 @@ def test_static_review_failure_does_not_kill_the_run(tmp_path):
     from mxfp4agent.toolchain.runner import StageResult, ToolchainReport
 
     def boom(self, plan, files):
-        raise LLMError("Anthropic HTTP 529: Overloaded")
+        raise LLMError("Ollama HTTP 503: server busy")
 
     def fake_toolchain(self, plan, round_id=0):
         rep = ToolchainReport()
@@ -257,44 +174,10 @@ def test_static_review_failure_does_not_kill_the_run(tmp_path):
     assert any(e.get("event") == "skipped" for e in result.trace)
 
 
-def test_anthropic_other_errors_are_not_swallowed():
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError
-
-    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
-
-    def boom(body):
-        raise LLMError("Anthropic HTTP 401: authentication_error")
-
-    prov._call = boom
-    try:
-        prov.complete("sys", "ciao")
-    except LLMError as e:
-        assert "401" in str(e)
-    else:
-        raise AssertionError("l'errore doveva propagarsi")
 
 
-def test_anthropic_empty_thinking_response_gives_actionable_error():
-    """Il caso reale: extended thinking consuma max_tokens, zero blocchi di testo."""
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError
-
-    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test", max_tokens=8192)
-    err = prov._empty_response_error([{"type": "thinking", "thinking": ""}], "max_tokens", 8192)
-    assert isinstance(err, LLMError)
-    msg = str(err)
-    assert "extended thinking" in msg and "--max-tokens" in msg and "8192" in msg
 
 
-def test_claude_default_budget_is_large_enough_for_thinking():
-    from mxfp4agent.llm import DEFAULT_MAX_TOKENS, build_provider
-
-    assert DEFAULT_MAX_TOKENS["claude"] >= 32000
-    assert build_provider("claude", api_key="x").max_tokens == DEFAULT_MAX_TOKENS["claude"]
-    assert build_provider("ollama").max_tokens == DEFAULT_MAX_TOKENS["ollama"]
-    # un valore esplicito ha sempre la precedenza
-    assert build_provider("claude", api_key="x", max_tokens=1234).max_tokens == 1234
 
 
 def test_truncated_response_is_flagged(capsys=None):
@@ -320,15 +203,6 @@ def test_truncated_response_is_flagged(capsys=None):
     assert warnings and "TRONCATA" in warnings[0]
 
 
-def test_anthropic_health_check_reports_401():
-    from mxfp4agent.llm.anthropic_provider import AnthropicProvider
-    from mxfp4agent.llm.base import LLMError
-
-    prov = AnthropicProvider(model="claude-sonnet-5", api_key="sk-ant-test")
-    prov._call = lambda body: (_ for _ in ()).throw(LLMError("Anthropic HTTP 401: bad key"))
-    ok, detail = prov.health_check(live=True)
-    assert not ok and "401" in detail
-    assert prov.health_check(live=False)[0] is True   # controllo economico: non chiama
 
 
 # ------------------------------------------------------ invocazione toolchain

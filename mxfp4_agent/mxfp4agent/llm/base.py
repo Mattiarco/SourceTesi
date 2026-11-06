@@ -1,6 +1,6 @@
 """Abstract LLM provider layer.
 
-Every backend (Ollama, Anthropic, mock) implements :class:`LLMProvider`, so the
+Every backend (Ollama, mock) implements :class:`LLMProvider`, so the
 agents never care which engine is behind them.
 """
 from __future__ import annotations
