@@ -9,7 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..toolchain import ToolchainReport, ToolchainRunner, scaffold, write_header
+from ..toolchain.chisel_lint import lint_chisel
 from ..toolchain.errsum import summarize_errors
+from ..toolchain.stage import StageResult
 from ..toolchain.testvectors import HEADER_NAME
 from ..utils import ExtractedFile, truncate
 from .base import Agent, AgentResult
@@ -41,11 +43,12 @@ class TesterAgent(Agent):
     system_prompt = SYSTEM
 
     def __init__(self, provider, log, workdir: Path, synth: bool = True,
-                 target_mhz: float = 100.0, **kw) -> None:
+                 target_mhz: float = 100.0, lint: bool = True, **kw) -> None:
         super().__init__(provider, log, **kw)
         self.workdir = Path(workdir)
         self.synth = synth
         self.target_mhz = target_mhz
+        self.lint = lint
 
     # ------------------------------------------------------------ filesystem
     def materialize(self, plan: dict, files: list[ExtractedFile],
@@ -63,17 +66,21 @@ class TesterAgent(Agent):
         return n
 
     # -------------------------------------------------------------- toolchain
-    def run_toolchain(self, plan: dict, round_id: int = 0) -> ToolchainReport:
-        runner = ToolchainRunner(self.workdir, plan["module_name"],
-                                 synth=self.synth, target_mhz=self.target_mhz)
-        rep = runner.run_all()
-
+    def _write_logs(self, rep: ToolchainReport, round_id: int) -> None:
         # i log delle fasi vanno sempre su disco: senza, l'errore di build si
         # perde e resta solo un "✘ build fallito" inutilizzabile.
         logdir = self.workdir / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
         for s in rep.stages:
             (logdir / f"r{round_id}_{s.stage}.log").write_text(s.log, encoding="utf-8")
+
+    def run_toolchain(self, plan: dict, round_id: int = 0,
+                      pre: list[StageResult] | None = None) -> ToolchainReport:
+        runner = ToolchainRunner(self.workdir, plan["module_name"],
+                                 synth=self.synth, target_mhz=self.target_mhz)
+        rep = runner.run_all()
+        rep.stages[0:0] = pre or []
+        self._write_logs(rep, round_id)
 
         for s in rep.stages:
             if s.skipped and not s.ok:
@@ -110,11 +117,45 @@ Produci la diagnosi nel formato richiesto."""
         text = self.ask(prompt, keep_history=False)
         return AgentResult(False, {"stage": fail.stage, "log": fail.log}, text, text)
 
+    # ------------------------------------------------------------ lint statico
+    def static_lint(self, plan: dict, files: list[ExtractedFile]) -> StageResult:
+        """Lint Chisel deterministico. Applica IN PLACE le correzioni sicure ai file."""
+        logs, warn_logs, errors, warnings, fixed = [], [], 0, 0, 0
+        for f in files:
+            if f.ext != ".scala":
+                continue
+            res = lint_chisel(f.content, plan)
+            f.content = res.source
+            errors += len(res.errors)
+            warnings += len(res.warnings)
+            fixed += len(res.fixed)
+            if res.issues:
+                logs.append(res.report(f.path))
+            if res.warnings:
+                warn_logs.append(res.report(f.path, only=("warning",)))
+            for i in res.fixed:
+                self.log.info(f"lint: corretto {f.path}:{i.line} — {i.message}")
+        detail = {"errors": errors, "warnings": warnings, "fixed": fixed,
+                  "warnings_text": "\n".join(warn_logs)}
+        head = (f"chisel-lint: {errors} errori, {warnings} avvisi, {fixed} correzioni "
+                f"automatiche")
+        return StageResult("chisel_lint", errors == 0, "\n".join([head, *logs]), detail=detail)
+
     # ------------------------------------------------------- run + diagnose
     def run(self, plan: dict, files: list[ExtractedFile], num_random: int = 64,
             seed: int = 1234, diagnose: bool = True, round_id: int = 0) -> AgentResult:
+        lint = self.static_lint(plan, files) if self.lint else None
         self.materialize(plan, files, num_random, seed)
-        report = self.run_toolchain(plan, round_id)
+        if lint is not None and not lint.ok:
+            # Errore certo: inutile spendere un'elaborazione sbt. Il report del
+            # lint è già azionabile, quindi niente diagnosi LLM del Tester.
+            report = ToolchainReport([lint])
+            self._write_logs(report, round_id)
+            self.log.fail(f"chisel_lint: {lint.detail['errors']} errori bloccanti "
+                          f"→ logs/r{round_id}_chisel_lint.log")
+            self.log.block("chisel_lint", lint.log, 2500)
+            return AgentResult(False, report, "", "", meta={"lint": True})
+        report = self.run_toolchain(plan, round_id, pre=[lint] if lint else [])
         if report.blocked:
             return AgentResult(False, report, "",
                                "Toolchain incompleta: file generati ma non verificati.",

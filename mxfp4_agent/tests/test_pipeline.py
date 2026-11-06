@@ -165,7 +165,7 @@ def test_static_review_failure_does_not_kill_the_run(tmp_path):
     def boom(self, plan, files):
         raise LLMError("Ollama HTTP 503: server busy")
 
-    def fake_toolchain(self, plan, round_id=0):
+    def fake_toolchain(self, plan, round_id=0, pre=None):
         rep = ToolchainReport()
         for st in ("elaborate", "lint", "build", "simulate"):
             rep.add(StageResult(st, True, "(simulata)", detail={"passed": 8}))
@@ -366,7 +366,7 @@ def test_end_to_end_mock_materializes_project(tmp_path):
     from mxfp4agent.agents.tester import TesterAgent
     from mxfp4agent.toolchain.runner import StageResult, ToolchainReport
 
-    def fake_toolchain(self, plan, round_id=0):
+    def fake_toolchain(self, plan, round_id=0, pre=None):
         rep = ToolchainReport()
         for st in ("elaborate", "lint", "build", "simulate"):
             rep.add(StageResult(st, True, "(toolchain simulata nel test)",

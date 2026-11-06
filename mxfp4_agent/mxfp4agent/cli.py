@@ -79,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("-o", "--outdir", type=Path, default=Path("out"))
     w.add_argument("--max-fix-rounds", type=int, default=4)
     w.add_argument("--no-static-review", action="store_true")
+    w.add_argument("--no-lint", action="store_true",
+                   help="disattiva il lint Chisel statico (per ablazione)")
     w.add_argument("--few-shot", action=argparse.BooleanOptionalAction, default=True,
                    help="includi il design di riferimento più vicino al piano nel prompt "
                         "del Coder (default: sì; --no-few-shot per l'ablazione)")
@@ -196,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             outdir=args.outdir,
             max_fix_rounds=0 if args.selftest else args.max_fix_rounds,
             static_review=not args.no_static_review and not args.selftest,
+            chisel_lint=not args.no_lint,
             few_shot=args.few_shot,
             num_random_vectors=args.vectors,
             seed=args.seed,

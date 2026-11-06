@@ -108,7 +108,8 @@ class Workflow:
 
         workdir = Path(cfg.outdir) / plan["module_name"]
         tester = TesterAgent(self.providers["tester"], self.log, workdir,
-                             synth=cfg.synth, target_mhz=cfg.target_mhz)
+                             synth=cfg.synth, target_mhz=cfg.target_mhz,
+                             lint=cfg.chisel_lint)
 
         compiled = PlannerAgent.compile_coder_prompt(plan, cfg.request)
         workdir.mkdir(parents=True, exist_ok=True)
@@ -206,8 +207,10 @@ class Workflow:
             # Se il codice cambia ma l'errore resta identico, il problema non è
             # nel codice: è nel modo in cui invochiamo la toolchain. Continuare
             # a "riparare" brucia round e token inseguendo un fantasma.
+            # (Il lint statico è escluso: lì un errore ripetuto è un fix mancato
+            # del modello, non un problema di invocazione della toolchain.)
             signature = self._signature(fail)
-            if signature == prev_signature:
+            if signature == prev_signature and fail.stage != "chisel_lint":
                 msg = (f"Errore IDENTICO a quello del round precedente nella fase "
                        f"'{fail.stage}', nonostante il codice sia cambiato.\n"
                        f"Non è un bug del design generato: è l'invocazione della "
@@ -224,7 +227,7 @@ class Workflow:
             self.log.stage("reviewer", f"fix round {rnd + 1} (fase: {fail.stage})…")
             if tres.notes:
                 self.log.block("diagnosi del tester", tres.notes, 1200)
-            evidence = self.fixer_evidence(fail, workdir)
+            evidence = self.fixer_evidence(fail, workdir, last_report)
             try:
                 fres = reviewer.fix(plan, files, fail.stage,
                                     f"{tres.notes}\n\n{evidence}", issues, rnd + 1,
@@ -254,18 +257,26 @@ class Workflow:
 
     # -------------------------------------------------------------- finalize
     @staticmethod
-    def fixer_evidence(fail, workdir: Path, tail_chars: int = 1500) -> str:
+    def fixer_evidence(fail, workdir: Path, report=None, tail_chars: int = 1500) -> str:
         """Log per il Fixer: riassunto file:riga + contesto, più la coda del log grezzo.
 
         Il riassunto è ciò su cui il modello deve agire; la coda resta perché
         un formato di errore non riconosciuto non deve far perdere informazione.
+        Gli avvisi del lint statico si aggiungono quando a fallire è una fase
+        successiva: spesso ne sono la causa (es. `+` che tronca → vettori errati).
         """
         summary = summarize_errors(fail.log, workdir)
-        if not summary:
-            return fail.log
-        tail = fail.log[-tail_chars:]
-        return (f"RIASSUNTO DEGLI ERRORI (posizioni nel tuo codice):\n{summary}\n\n"
-                f"--- coda del log grezzo ---\n{tail}")
+        if summary:
+            text = (f"RIASSUNTO DEGLI ERRORI (posizioni nel tuo codice):\n{summary}\n\n"
+                    f"--- coda del log grezzo ---\n{fail.log[-tail_chars:]}")
+        else:
+            text = fail.log
+        lint = next((s for s in (report.stages if report else [])
+                     if s.stage == "chisel_lint" and s is not fail), None)
+        if lint is not None and lint.detail.get("warnings_text"):
+            text += ("\n\n--- AVVISI DEL LINT STATICO (possibili cause) ---\n"
+                     + lint.detail["warnings_text"])
+        return text
 
     @staticmethod
     def _signature(fail) -> str:
