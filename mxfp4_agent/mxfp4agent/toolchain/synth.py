@@ -49,10 +49,24 @@ _PACKED_ARRAY_HINT = (
 def _clean_yosys(log: str, limit: int = 5000) -> str:
     """Tiene le righe utili di un log Yosys (ERROR, Warning, Latch, loop)."""
     keep = [ln for ln in log.splitlines()
-            if re.search(r"ERROR|Warning|[Ll]atch inferred|[Ll]ogic loop|multiple conflicting"
+            if re.search(r"ERROR|Warning|(?<!No )[Ll]atch inferred|[Ll]ogic loop|multiple conflicting"
                          r"|drivers|problems", ln)]
     out = "\n".join(dict.fromkeys(keep)) or log
     return out[-limit:]
+
+
+_LATCH = re.compile(r"^Latch inferred for signal `\\?([^']+)'", re.MULTILINE)
+
+
+def detect_latches(yosys_log: str) -> list[str]:
+    """Segnali per cui Yosys (pass PROC_DLATCH) ha davvero creato un latch.
+
+    Attenzione: Yosys stampa anche "No latch inferred for signal …" per ogni
+    process combinatorio verificato (es. i `casez` che firtool genera dalle
+    LUT `VecInit`): quelle righe NON sono latch. Una ricerca ingenua di
+    "latch inferred" le scambiava per errori e scartava design corretti.
+    """
+    return [m.group(1).replace(".\\", ".") for m in _LATCH.finditer(yosys_log)]
 
 
 def parse_yosys_stat(stat_json: dict, top: str) -> dict:
@@ -117,9 +131,10 @@ def run_synth(root: Path, module: str, rtl_files: list[Path], timeout: int = 900
 
     # Problemi di sintetizzabilità che Yosys segnala come warning, non come errore.
     problems = []
-    if re.search(r"[Ll]atch inferred", full):
-        problems.append("latch inferito: un process combinatorio non assegna tutte le uscite "
-                        "in tutti i rami (o manca l'`else`).")
+    latches = detect_latches(full)
+    if latches:
+        problems.append(f"latch inferito su {', '.join(latches[:5])}: un process combinatorio "
+                        "non assegna tutte le uscite in tutti i rami (o manca l'`else`).")
     m = re.search(r"[Ff]ound and reported\s+(\d+)\s+problems?", full)
     if m and int(m.group(1)) > 0:
         problems.append(f"`check` di Yosys ha riportato {m.group(1)} problemi "

@@ -62,3 +62,21 @@ def test_synth_flags_latch_and_packed_arrays(tmp_path):
                   "  assign y = g[i];\nendmodule")
     s = run_synth(tmp_path, "P", [pk])
     assert not s.ok and "disallowPackedArrays" in s.log
+
+
+# Righe reali di Yosys 0.70 (pass PROC_DLATCH) sul design di riferimento MXFP4DotProduct:
+# le LUT VecInit indicizzate diventano `casez` e Yosys conferma che NON servono latch.
+YOSYS_NO_LATCH = """3.4.8. Executing PROC_DLATCH pass (convert process syncs to latches).
+No latch inferred for signal `\MXFP4DotProduct.\casez_tmp_62' from process `\MXFP4DotProduct.$/x/rtl/MXFP4DotProduct.sv:1486$proc$221'.
+No latch inferred for signal `\MXFP4DotProduct.\casez_tmp' from process `\MXFP4DotProduct.$/x/rtl/MXFP4DotProduct.sv:15$proc$1'.
+"""
+YOSYS_LATCH = """3.4.8. Executing PROC_DLATCH pass (convert process syncs to latches).
+Latch inferred for signal `\L.\y' from process `\L.$proc$/x/L.sv:1$1': $auto$proc_dlatch.cc:427:proc_dlatch$5
+"""
+
+
+def test_no_latch_inferred_is_not_a_latch():
+    from mxfp4agent.toolchain.synth import detect_latches
+
+    assert detect_latches(YOSYS_NO_LATCH) == []
+    assert detect_latches(YOSYS_LATCH) == ["L.y"]
