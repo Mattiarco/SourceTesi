@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,6 +12,31 @@ from .synth import run_implement, run_synth
 
 PASS_RE = re.compile(r"TEST\s+PASSED\s*\((\d+)", re.IGNORECASE)
 FAIL_RE = re.compile(r"TEST\s+FAILED\s*\((\d+)\s*/\s*(\d+)", re.IGNORECASE)
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+
+def strip_ansi(text: str) -> str:
+    """Il client sbt colora l'output anche se rediretto: i codici ANSI rompono i parser."""
+    return _ANSI.sub("", text or "")
+
+
+def _looks_like_build_error(r: CmdResult) -> bool:
+    """True se sbt ha davvero compilato/eseguito e fallito per colpa del design."""
+    out = r.stdout + r.stderr
+    return bool(re.search(r"\.scala:\d+|Exception|Compilation failed|error: |"
+                          r"Nonzero exit code|FirtoolNonZeroExitCode", out))
+
+
+def shutdown_sbt_server(root: Path, timeout: int = 60) -> bool:
+    """Chiude il server sbt avviato da `sbt --client` nel progetto, se c'è.
+
+    Senza, ogni run lascerebbe una JVM da ~1-2 GB in memoria: in una campagna
+    di benchmark la macchina finirebbe la RAM.
+    """
+    root = Path(root).resolve()
+    if not (root / "project" / "target" / "active.json").exists() or not which("sbt"):
+        return False
+    return run(["sbt", "--client", "shutdown"], cwd=root, timeout=timeout).ok
 
 
 @dataclass
@@ -56,13 +82,34 @@ class ToolchainReport:
             f"{'-' if s.skipped else icons[s.ok]} {s.stage}" for s in self.stages)
 
 
+def resolve_sbt_mode(mode: str) -> str:
+    """`auto` → client su Linux/macOS, batch su Windows.
+
+    Su Windows sbtn passa a sbt.bat un path con `%20` (es. `Program%20Files`)
+    e l'avvio del server resta appeso: verificato con sbt 1.10.
+    """
+    if mode not in ("auto", "client", "batch"):
+        raise ValueError(f"sbt_mode non valido: {mode!r} (auto | client | batch)")
+    if ToolchainRunner._client_broken:
+        return "batch"
+    if mode == "auto":
+        return "batch" if sys.platform.startswith("win") else "client"
+    return mode
+
+
 class ToolchainRunner:
     """Guida il progetto generato attraverso sbt e Verilator."""
+
+    #: diventa True dopo un fallimento "di infrastruttura" del client sbt
+    _client_broken = False
 
     def __init__(self, root: Path, module: str,
                  sbt_timeout: int = 1800, verilator_timeout: int = 900,
                  sim_timeout: int = 300, synth: bool = True,
-                 target_mhz: float = 100.0, synth_timeout: int = 900) -> None:
+                 target_mhz: float = 100.0, synth_timeout: int = 900,
+                 sbt_mode: str = "auto", sbt_client_timeout: int = 420) -> None:
+        self.sbt_mode = sbt_mode
+        self.sbt_client_timeout = sbt_client_timeout
         # SEMPRE assoluto: i comandi girano con cwd=self.root, quindi un path
         # relativo verrebbe risolto due volte ("out/X/out/X/rtl/...") e Verilator
         # non troverebbe l'RTL appena generato.
@@ -101,14 +148,37 @@ class ToolchainRunner:
         self.rtl_dir.mkdir(parents=True, exist_ok=True)
         for f in self.rtl_files():
             f.unlink()
-        r = run(["sbt", "-batch", "-Dsbt.color=false", "runMain mxfp4.Elaborate"],
-                cwd=self.root, timeout=self.sbt_timeout,
-                env={"MXFP4_RTL_DIR": "rtl", "JAVA_OPTS": "-Xmx2G"})
+        mode = resolve_sbt_mode(self.sbt_mode)
+        r = self._sbt("runMain mxfp4.Elaborate", mode)
+        if mode == "client" and not r.ok and (r.timed_out or not _looks_like_build_error(r)):
+            # Il client non è riuscito a parlare col server (socket, lock in
+            # ~/.sbt, sbt troppo vecchio, avvio appeso): non è un errore del
+            # design. Si ripiega su -batch e non si riprova più in questo processo.
+            ToolchainRunner._client_broken = True
+            shutdown_sbt_server(self.root, timeout=30)
+            mode = "batch"
+            r = self._sbt("runMain mxfp4.Elaborate", mode)
         produced = self.rtl_files()
         ok = r.ok and bool(produced)
         log = r.log if ok else self._clean_sbt(r)
         return StageResult("elaborate", ok, log,
-                           detail={"rtl_files": [p.name for p in produced]})
+                           detail={"rtl_files": [p.name for p in produced], "sbt_mode": mode})
+
+    def _sbt(self, task: str, mode: str) -> CmdResult:
+        env = {"MXFP4_RTL_DIR": "rtl", "JAVA_OPTS": "-Xmx2G", "NO_COLOR": "1"}
+        timeout = self.sbt_timeout
+        if mode == "client":
+            # Il primo comando avvia un server sbt per QUESTO progetto; i round
+            # successivi lo riusano (JVM calda, build già caricato, compilazione
+            # incrementale). Il server si chiude con shutdown_sbt_server().
+            # Timeout più corto: un client appeso deve ripiegare presto su -batch.
+            cmd = ["sbt", "--client", task]
+            timeout = min(timeout, self.sbt_client_timeout)
+        else:
+            cmd = ["sbt", "-batch", "-Dsbt.color=false", "-Dsbt.supershell=false", task]
+        r = run(cmd, cwd=self.root, timeout=timeout, env=env)
+        r.stdout, r.stderr = strip_ansi(r.stdout), strip_ansi(r.stderr)
+        return r
 
     @staticmethod
     def _clean_sbt(r: CmdResult) -> str:

@@ -43,12 +43,14 @@ class TesterAgent(Agent):
     system_prompt = SYSTEM
 
     def __init__(self, provider, log, workdir: Path, synth: bool = True,
-                 target_mhz: float = 100.0, lint: bool = True, **kw) -> None:
+                 target_mhz: float = 100.0, lint: bool = True,
+                 sbt_mode: str = "auto", **kw) -> None:
         super().__init__(provider, log, **kw)
         self.workdir = Path(workdir)
         self.synth = synth
         self.target_mhz = target_mhz
         self.lint = lint
+        self.sbt_mode = sbt_mode
 
     # ------------------------------------------------------------ filesystem
     def materialize(self, plan: dict, files: list[ExtractedFile],
@@ -77,7 +79,8 @@ class TesterAgent(Agent):
     def run_toolchain(self, plan: dict, round_id: int = 0,
                       pre: list[StageResult] | None = None) -> ToolchainReport:
         runner = ToolchainRunner(self.workdir, plan["module_name"],
-                                 synth=self.synth, target_mhz=self.target_mhz)
+                                 synth=self.synth, target_mhz=self.target_mhz,
+                                 sbt_mode=self.sbt_mode)
         rep = runner.run_all()
         rep.stages[0:0] = pre or []
         self._write_logs(rep, round_id)

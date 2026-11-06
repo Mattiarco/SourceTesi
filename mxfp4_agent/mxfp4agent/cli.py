@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("-o", "--outdir", type=Path, default=Path("out"))
     w.add_argument("--max-fix-rounds", type=int, default=4)
     w.add_argument("--no-static-review", action="store_true")
+    w.add_argument("--sbt-mode", choices=["auto", "client", "batch"], default="auto",
+                   help="client: server sbt riusato fra i round (veloce); batch: una JVM per "
+                        "round; auto: client su Linux/macOS, batch su Windows")
     w.add_argument("--no-lint", action="store_true",
                    help="disattiva il lint Chisel statico (per ablazione)")
     w.add_argument("--few-shot", action=argparse.BooleanOptionalAction, default=True,
@@ -141,7 +144,8 @@ def cmd_resume(args) -> int:
         print(f"plan.json non trovato in {root}", file=sys.stderr)
         return 2
     plan = json.loads(plan_file.read_text(encoding="utf-8"))
-    runner = ToolchainRunner(root, plan["module_name"],
+    # una sola elaborazione: un server sbt persistente non servirebbe
+    runner = ToolchainRunner(root, plan["module_name"], sbt_mode="batch",
                              synth=not args.no_synth, target_mhz=args.target_mhz)
     rep = runner.run_all()
     for s in rep.stages:
@@ -199,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             max_fix_rounds=0 if args.selftest else args.max_fix_rounds,
             static_review=not args.no_static_review and not args.selftest,
             chisel_lint=not args.no_lint,
+            sbt_mode=args.sbt_mode,
             few_shot=args.few_shot,
             num_random_vectors=args.vectors,
             seed=args.seed,

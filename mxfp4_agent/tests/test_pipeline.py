@@ -395,3 +395,62 @@ def test_end_to_end_mock_materializes_project(tmp_path):
     assert result.plan["module_name"] == "MXFP4DotProduct"
     # senza sbt/verilator installati il risultato non può essere "ok"
     assert result.workdir == root
+
+
+# ---------------------------------------------------------------- sbt client
+def test_sbt_mode_resolution_and_fallback(tmp_path):
+    import sys as _sys
+
+    from mxfp4agent.toolchain import runner as R
+    from mxfp4agent.toolchain.shell import CmdResult
+
+    R.ToolchainRunner._client_broken = False
+    expected = "batch" if _sys.platform.startswith("win") else "client"
+    assert R.resolve_sbt_mode("auto") == expected
+    assert R.resolve_sbt_mode("batch") == "batch"
+
+    calls = []
+
+    def fake_sbt(self, task, mode):
+        calls.append(mode)
+        if mode == "client":   # client appeso: timeout senza alcun output di build
+            return CmdResult(["sbt", "--client"], 124, "", "", timed_out=True)
+        (self.rtl_dir / "M.sv").write_text("module M; endmodule\n")
+        return CmdResult(["sbt", "-batch"], 0, "[success]", "")
+
+    orig_sbt, orig_which = R.ToolchainRunner._sbt, R.which
+    R.ToolchainRunner._sbt, R.which = fake_sbt, (lambda name: "/usr/bin/" + name)
+    try:
+        s = R.ToolchainRunner(tmp_path, "M", sbt_mode="client").elaborate()
+        assert s.ok and s.detail["sbt_mode"] == "batch" and calls == ["client", "batch"]
+        # da qui in poi il client non si riprova più
+        assert R.resolve_sbt_mode("client") == "batch"
+    finally:
+        R.ToolchainRunner._sbt, R.which = orig_sbt, orig_which
+        R.ToolchainRunner._client_broken = False
+
+
+def test_build_errors_do_not_trigger_the_batch_fallback(tmp_path):
+    from mxfp4agent.toolchain import runner as R
+    from mxfp4agent.toolchain.shell import CmdResult
+
+    calls = []
+
+    def fake_sbt(self, task, mode):
+        calls.append(mode)
+        return CmdResult(["sbt"], 1, "[error] /x/Foo.scala:3:1: not found: value Cat", "")
+
+    orig_sbt, orig_which = R.ToolchainRunner._sbt, R.which
+    R.ToolchainRunner._sbt, R.which = fake_sbt, (lambda name: "/usr/bin/" + name)
+    try:
+        s = R.ToolchainRunner(tmp_path, "M", sbt_mode="client").elaborate()
+        assert not s.ok and calls == ["client"]
+        assert not R.ToolchainRunner._client_broken
+    finally:
+        R.ToolchainRunner._sbt, R.which = orig_sbt, orig_which
+
+
+def test_ansi_codes_are_stripped():
+    from mxfp4agent.toolchain.runner import strip_ansi
+
+    assert strip_ansi("\x1b[31m[error]\x1b[0m Foo.scala:1:2: x") == "[error] Foo.scala:1:2: x"

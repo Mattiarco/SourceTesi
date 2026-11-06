@@ -12,6 +12,7 @@ from .knowledge.references import select_reference
 from .llm import LLMError, build_provider
 from .toolchain import check_path_sanity, format_tool_report, tool_report
 from .toolchain.errsum import summarize_errors
+from .toolchain.runner import shutdown_sbt_server
 from .utils import ExtractedFile, Log
 
 
@@ -82,6 +83,15 @@ class Workflow:
 
     # ------------------------------------------------------------------- run
     def run(self) -> RunResult:
+        self._workdir: Path | None = None
+        try:
+            return self._run()
+        finally:
+            # il server di `sbt --client` occupa 1-2 GB: non deve sopravvivere alla run
+            if self._workdir is not None and shutdown_sbt_server(self._workdir):
+                self.log.info("server sbt chiuso")
+
+    def _run(self) -> RunResult:
         cfg = self.cfg
         ok, detail = self.preflight()
         if not ok:
@@ -107,9 +117,10 @@ class Workflow:
         self._t("planner", "plan", module=plan["module_name"])
 
         workdir = Path(cfg.outdir) / plan["module_name"]
+        self._workdir = workdir
         tester = TesterAgent(self.providers["tester"], self.log, workdir,
                              synth=cfg.synth, target_mhz=cfg.target_mhz,
-                             lint=cfg.chisel_lint)
+                             lint=cfg.chisel_lint, sbt_mode=cfg.sbt_mode)
 
         compiled = PlannerAgent.compile_coder_prompt(plan, cfg.request)
         workdir.mkdir(parents=True, exist_ok=True)
