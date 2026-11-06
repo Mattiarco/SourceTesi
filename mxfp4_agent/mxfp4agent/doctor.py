@@ -8,6 +8,7 @@ cache offline di Chisel/firtool.
 from __future__ import annotations
 
 import os
+import platform
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,11 +18,29 @@ from .toolchain.shell import check_path_sanity, run, which
 
 FIRTOOL_VERSION = "1.62.1"      # quella con cui è pubblicato Chisel 6.6.0
 SETUP = "bash scripts/setup_server.sh   # installa tutto in ~/.local/mxfp4, senza sudo"
-OSS = ("OSS CAD Suite (yosys, nextpnr-ecp5, verilator), senza sudo:\n"
-       "      curl -L -o oss.tgz https://github.com/YosysHQ/oss-cad-suite-build/releases/"
-       "download/<data>/oss-cad-suite-linux-x64-<data>.tgz\n"
-       "      tar -xzf oss.tgz -C ~/.local && export PATH=~/.local/oss-cad-suite/bin:$PATH\n"
-       f"      oppure: {SETUP}")
+
+
+def is_arm64(machine: str | None = None) -> bool:
+    return (machine or platform.machine()).lower() in ("aarch64", "arm64")
+
+
+def oss_hint(machine: str | None = None) -> str:
+    arch = "arm64" if is_arm64(machine) else "x64"
+    return ("OSS CAD Suite (yosys, nextpnr-ecp5, verilator), senza sudo:\n"
+            "      curl -L -o oss.tgz https://github.com/YosysHQ/oss-cad-suite-build/releases/"
+            f"download/<data>/oss-cad-suite-linux-{arch}-<data>.tgz\n"
+            "      tar -xzf oss.tgz -C ~/.local && export PATH=~/.local/oss-cad-suite/bin:$PATH\n"
+            f"      oppure: {SETUP}")
+
+
+def ollama_hint(machine: str | None = None) -> str:
+    arch = "arm64" if is_arm64(machine) else "amd64"
+    return (f"senza sudo: scarica https://ollama.com/download/ollama-linux-{arch}.tgz, "
+            "estrailo in ~/.local/ollama e avvia `~/.local/ollama/bin/ollama serve` "
+            "(in tmux/screen); se gira altrove imposta OLLAMA_HOST o --host")
+
+
+OSS = oss_hint()
 
 
 @dataclass
@@ -54,9 +73,7 @@ def check_ollama(host: str, models: list[str]) -> list[Check]:
         version = prov._get_json("/api/version").get("version", "?")
     except Exception as e:  # noqa: BLE001
         return [Check("ollama", False, f"non raggiungibile su {prov.host}: {str(e)[:120]}",
-                      "senza sudo: scarica https://ollama.com/download/ollama-linux-amd64.tgz, "
-                      "estrailo in ~/.local/ollama e avvia `~/.local/ollama/bin/ollama serve` "
-                      "(in tmux/screen); se gira altrove imposta OLLAMA_HOST o --host")]
+                      ollama_hint())]
     out = [Check("ollama", True, f"{prov.host}, versione {version}, {len(installed)} modelli: "
                                  f"{', '.join(installed) or '-'}")]
     have = {normalize_model_name(n) for n in installed}
@@ -131,6 +148,40 @@ def check_chisel_cache() -> Check:
                  f"(lo fa anche {SETUP.split('#')[0].strip()})", required=False)
 
 
+def check_firtool(machine: str | None = None, env: dict | None = None) -> Check | None:
+    """firtool indicato con CHISEL_FIRTOOL_PATH, o mancante su aarch64.
+
+    Chisel 6.6 scarica firtool già compilato solo per x86_64; su aarch64 serve
+    quello compilato da setup_server.sh. firtool-resolver non controlla la
+    versione del binario indicato: un firtool diverso cambierebbe il Verilog
+    senza avvisi, quindi la si controlla qui. None = niente da segnalare (x86_64
+    senza CHISEL_FIRTOOL_PATH: ci pensa Chisel, vedi check_chisel_cache).
+    """
+    env = os.environ if env is None else env
+    path = env.get("CHISEL_FIRTOOL_PATH")
+    want = f"CIRCT firtool-{FIRTOOL_VERSION}"
+    script = SETUP.split("#")[0].strip()
+    if path:
+        exe = Path(path) / "firtool"
+        hint = ("CHISEL_FIRTOOL_PATH deve essere la CARTELLA che contiene firtool "
+                f"{FIRTOOL_VERSION}; su aarch64 lo compila: {script}")
+        if not exe.is_file():
+            return Check("firtool", False, f"{exe} non esiste", hint)
+        r = run([str(exe), "--version"], timeout=60)
+        got = next((ln.strip() for ln in (r.stdout + r.stderr).splitlines()
+                    if ln.strip().startswith("CIRCT ")), "versione non leggibile")
+        if got != want:
+            return Check("firtool", False, f"{exe}: {got}, serve {want}", hint)
+        return Check("firtool", True, f"{FIRTOOL_VERSION} da CHISEL_FIRTOOL_PATH ({path})")
+    if is_arm64(machine):
+        return Check("firtool", False,
+                     f"Chisel {CHISEL_VERSION} non distribuisce firtool per "
+                     f"{machine or platform.machine()} e CHISEL_FIRTOOL_PATH non è impostata",
+                     f"{script} lo compila dai sorgenti CIRCT {FIRTOOL_VERSION} "
+                     "(20-60 min, una volta sola), poi: source ~/.local/mxfp4/env.sh")
+    return None
+
+
 def check_tool(name: str, cmd: list[str], hint: str, required: bool = True,
                pattern: str = r"(\d+\.\d+(?:\.\d+)?)") -> Check:
     v = _version(cmd, pattern)
@@ -140,7 +191,9 @@ def check_tool(name: str, cmd: list[str], hint: str, required: bool = True,
 
 def run_checks(host: str, models: list[str], outdir: Path | None = None) -> list[Check]:
     checks = check_ollama(host, models)
-    checks += [check_gpu(), check_java(), check_sbt(), check_chisel_cache(),
+    fir = check_firtool()
+    checks += [check_gpu(), check_java(), check_sbt(), *([fir] if fir else []),
+               check_chisel_cache(),
                check_tool("verilator", ["verilator", "--version"], OSS,
                           pattern=r"Verilator (\d+\.\d+)"),
                check_tool("g++", ["g++", "--version"],

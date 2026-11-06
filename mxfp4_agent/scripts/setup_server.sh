@@ -3,16 +3,25 @@
 #
 #   JDK 17 + sbt         tramite Coursier (binario `cs` del repo, o scaricato)
 #   OSS CAD Suite        yosys, nextpnr-ecp5, verilator (build statiche ufficiali)
+#   firtool 1.62.1       solo su aarch64: compilato dai sorgenti CIRCT (Chisel 6.6
+#                        lo scarica già pronto solo per x86_64), vedi più sotto
 #   cache sbt/Chisel     dipendenze Maven, plugin Chisel e firtool pre-scaricati,
 #                        così le run successive funzionano anche offline
 #
-# È idempotente: rilanciarlo salta ciò che è già presente. Uso:
+# Architetture: Linux x86_64 e Linux aarch64 (es. DGX Spark). È idempotente:
+# rilanciarlo salta ciò che è già presente. Uso:
 #
 #   bash scripts/setup_server.sh                     # installa in ~/.local/mxfp4
 #   bash scripts/setup_server.sh --prefix /scratch/me/mxfp4
 #   bash scripts/setup_server.sh --models qwen2.5-coder:14b,qwen2.5-coder:32b
 #   bash scripts/setup_server.sh --add-to-bashrc     # aggiunge `source env.sh` a ~/.bashrc
 #   bash scripts/setup_server.sh --skip-warmup       # niente elaborazione di prova
+#   bash scripts/setup_server.sh --firtool-path DIR  # usa un firtool 1.62.1 già pronto
+#   bash scripts/setup_server.sh --build-firtool     # compila firtool anche su x86_64
+#   bash scripts/setup_server.sh --keep-build        # conserva la cartella di build
+#
+# Variabili: MXFP4_BUILD_DIR (build di firtool, ~20 GB; default <prefix>/build),
+# MXFP4_BUILD_JOBS (job paralleli; default nproc), CC/CXX (compilatore).
 #
 # Alla fine:   source ~/.local/mxfp4/env.sh   &&   python3 run.py --doctor
 set -euo pipefail
@@ -24,6 +33,9 @@ WARMUP=1
 OSS_URL="${OSS_CAD_SUITE_URL:-}"   # forzabile, es. per una release precisa
 JDK="${MXFP4_JDK:-temurin:17}"
 SBT_VERSION="1.10.1"               # deve coincidere con toolchain/scaffold.py
+FIRTOOL_PATH_ARG=""
+BUILD_FIRTOOL=0
+KEEP_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,7 +43,10 @@ while [[ $# -gt 0 ]]; do
     --models) MODELS="$2"; shift 2 ;;
     --add-to-bashrc) ADD_BASHRC=1; shift ;;
     --skip-warmup) WARMUP=0; shift ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --firtool-path) FIRTOOL_PATH_ARG="$2"; shift 2 ;;
+    --build-firtool) BUILD_FIRTOOL=1; shift ;;
+    --keep-build) KEEP_BUILD=1; shift ;;
+    -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) echo "opzione sconosciuta: $1" >&2; exit 2 ;;
   esac
 done
@@ -48,13 +63,16 @@ warn() { printf '\033[1;33m  !\033[0m %s\n' "$*"; }
 #   OSS_ARCH   nome nell'asset di OSS CAD Suite oss-cad-suite-linux-<OSS_ARCH>-AAAAMMGG.tgz
 #   OLLAMA_ARCH nome nell'archivio di Ollama   ollama-linux-<OLLAMA_ARCH>.tgz
 #   ELF_MACHINE campo e_machine dell'header ELF (per riconoscere il `cs` del repo)
+#   CMAKE_ARCH, NINJA_ASSET  binari di cmake/ninja, solo se si compila firtool
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "${OS}-${ARCH}" in
   Linux-x86_64|Linux-amd64)
-    CS_ARCH="x86_64"; OSS_ARCH="x64";   OLLAMA_ARCH="amd64"; ELF_MACHINE="3e00" ;;
+    CS_ARCH="x86_64"; OSS_ARCH="x64";   OLLAMA_ARCH="amd64"; ELF_MACHINE="3e00"
+    CMAKE_ARCH="x86_64";  NINJA_ASSET="ninja-linux.zip" ;;
   Linux-aarch64|Linux-arm64)
-    CS_ARCH="aarch64"; OSS_ARCH="arm64"; OLLAMA_ARCH="arm64"; ELF_MACHINE="b700" ;;
+    CS_ARCH="aarch64"; OSS_ARCH="arm64"; OLLAMA_ARCH="arm64"; ELF_MACHINE="b700"
+    CMAKE_ARCH="aarch64"; NINJA_ASSET="ninja-linux-aarch64.zip" ;;
   *)
     echo "piattaforma non supportata: ${OS}-${ARCH} (supportate: Linux x86_64, Linux aarch64)" >&2
     exit 1 ;;
@@ -126,6 +144,169 @@ ok "$("${PREFIX}/oss-cad-suite/bin/yosys" -V)"
 ok "$("${PREFIX}/oss-cad-suite/bin/verilator" --version)"
 ok "$("${PREFIX}/oss-cad-suite/bin/nextpnr-ecp5" --version 2>&1 | head -1)"
 
+# ------------------------------------------------------------------ firtool
+# Chisel 6.6 scarica firtool 1.62.1 da Maven (org.chipsalliance:llvm-firtool),
+# che contiene binari solo per linux-x64, macos-x64 e windows-x64; nemmeno le
+# release di CIRCT hanno binari linux-aarch64. Su aarch64 lo si compila qui dai
+# sorgenti ufficiali della release (sha256 verificato), con gli stessi flag
+# della build ufficiale (.github/workflows/unifiedBuildTestAndInstall.yml),
+# e Chisel lo trova tramite CHISEL_FIRTOOL_PATH, che è la CARTELLA del binario.
+# firtool-resolver NON controlla la versione del binario indicato: lo fa questo
+# script (e `run.py --doctor`), perché un firtool diverso cambia il Verilog.
+FIRTOOL_VERSION="1.62.1"   # deve coincidere con mxfp4agent/doctor.py (Chisel 6.6.0)
+FIRTOOL_SHA256="827f071e898fa7e2f08bd91efae9e3bef9e8a9706a7c8ce235670d26a8578bf6"
+CMAKE_VERSION="3.30.5"     # LLVM 18 richiede cmake >= 3.20
+NINJA_VERSION="1.12.1"
+
+# True se la cartella $1 contiene firtool ${FIRTOOL_VERSION}.
+firtool_ok() {
+  [[ -x "$1/firtool" ]] && "$1/firtool" --version 2>/dev/null | grep -qx "CIRCT firtool-${FIRTOOL_VERSION}"
+}
+
+# True se la versione $1 è >= $2.
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$2" ]]; }
+
+# cmake >= 3.20 e ninja: quelli di sistema se adeguati, altrimenti binari
+# ufficiali in <prefix>/tools (solo per la build, non finiscono in env.sh).
+ensure_cmake_ninja() {
+  local tools="${PREFIX}/tools" have
+  have="$(cmake --version 2>/dev/null | sed -n '1s/[^0-9]*\([0-9.]*\).*/\1/p' || true)"
+  if [[ -z "${have}" ]] || ! version_ge "${have}" 3.20; then
+    if [[ ! -x "${tools}/cmake/bin/cmake" ]]; then
+      log "cmake ${CMAKE_VERSION} (linux-${CMAKE_ARCH})"
+      mkdir -p "${tools}/cmake"
+      curl -fL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}.tar.gz" \
+        | tar -xz -C "${tools}/cmake" --strip-components=1
+    fi
+    export PATH="${tools}/cmake/bin:${PATH}"
+  fi
+  if ! command -v ninja >/dev/null 2>&1; then
+    if [[ ! -x "${tools}/bin/ninja" ]]; then
+      log "ninja ${NINJA_VERSION} (${NINJA_ASSET})"
+      mkdir -p "${tools}/bin"
+      curl -fL -o "${tools}/ninja.zip" \
+        "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/${NINJA_ASSET}"
+      # python3 invece di unzip, che sui server spesso manca
+      python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("ninja", sys.argv[2])' \
+        "${tools}/ninja.zip" "${tools}/bin"
+      chmod +x "${tools}/bin/ninja"
+      rm -f "${tools}/ninja.zip"
+    fi
+    export PATH="${tools}/bin:${PATH}"
+  fi
+  ok "$(cmake --version | head -1), ninja $(ninja --version)"
+}
+
+# Compila firtool ${FIRTOOL_VERSION} e lo installa in $1 (binario in $1/bin).
+# Riprendibile: rilanciando lo script, ninja riparte da dove si era fermato.
+build_firtool() {
+  local dest="$1"
+  local work="${MXFP4_BUILD_DIR:-${PREFIX}/build}/circt-${FIRTOOL_VERSION}"
+  local jobs="${MXFP4_BUILD_JOBS:-$(nproc)}"
+  local cc cxx free_gb pid
+  if command -v gcc >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then cc=gcc; cxx=g++
+  elif command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; then cc=clang; cxx=clang++
+  else
+    echo "per compilare firtool serve un compilatore C/C++ (gcc/g++ >= 7.4 o clang >= 5);" \
+         "senza sudo: conda install -c conda-forge gxx, poi rilancia" >&2
+    exit 1
+  fi
+  cc="${CC:-${cc}}"; cxx="${CXX:-${cxx}}"
+  command -v git >/dev/null 2>&1 || { echo "per compilare firtool serve git (stringa di versione)" >&2; exit 1; }
+
+  mkdir -p "${work}"
+  free_gb=$(( $(df -Pk "${work}" | awk 'NR == 2 { print $4 }') / 1048576 ))
+  if [[ ! -d "${work}/build" ]] && (( free_gb < 20 )); then
+    echo "spazio insufficiente in ${work}: ${free_gb} GB liberi, ne servono ~20" \
+         "(scegli un'altra cartella con MXFP4_BUILD_DIR=...)" >&2
+    exit 1
+  fi
+  ensure_cmake_ninja
+
+  if [[ ! -f "${work}/src/CMakeLists.txt" ]]; then
+    log "firtool ${FIRTOOL_VERSION}: sorgenti CIRCT (circt-full-sources.tar.gz, ~210 MB)"
+    curl -fL -o "${work}/src.tgz" \
+      "https://github.com/llvm/circt/releases/download/firtool-${FIRTOOL_VERSION}/circt-full-sources.tar.gz"
+    echo "${FIRTOOL_SHA256}  ${work}/src.tgz" | sha256sum -c --quiet - \
+      || { echo "sha256 dei sorgenti CIRCT non corrisponde: download corrotto?" >&2; exit 1; }
+    rm -rf "${work}/src.part"
+    mkdir -p "${work}/src.part"
+    tar -xzf "${work}/src.tgz" -C "${work}/src.part"
+    # firtool stampa "CIRCT <git describe --tags --match firtool*>", ma il tarball
+    # non ha la storia git: senza questo stamperebbe "unknown git version".
+    # Un repo con un solo commit vuoto e il tag della release basta; i sorgenti
+    # restano non tracciati, quindi `--dirty` non scatta.
+    (cd "${work}/src.part" \
+      && git init -q \
+      && git -c user.name=mxfp4 -c user.email=mxfp4@localhost commit -q --allow-empty \
+           -m "circt-full-sources firtool-${FIRTOOL_VERSION} (sha256 ${FIRTOOL_SHA256:0:16})" \
+      && git tag "firtool-${FIRTOOL_VERSION}")
+    mv "${work}/src.part" "${work}/src"
+    rm -f "${work}/src.tgz"
+  fi
+
+  log "firtool ${FIRTOOL_VERSION}: configurazione (${cxx}, ${jobs} job)"
+  # `-include cstdint`: LLVM 18 (base di firtool 1.62.1) usa uint64_t in
+  # SmallVector.h & co. senza includere <cstdint>, che la libstdc++ di GCC >= 15
+  # non porta più con sé ("'uint64_t' was not declared in this scope"). Forzare
+  # l'header non tocca i sorgenti né il codice generato; con GCC più vecchi è innocuo.
+  if ! cmake -G Ninja -S "${work}/src/llvm/llvm" -B "${work}/build" \
+      -DCMAKE_CXX_FLAGS="${CXXFLAGS:-} -include cstdint" \
+      -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLLVM_ENABLE_ASSERTIONS=OFF \
+      -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_EXTERNAL_PROJECTS=circt \
+      -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR="${work}/src" -DLLVM_TARGETS_TO_BUILD=host \
+      -DLLVM_BUILD_EXAMPLES=OFF -DLLVM_STATIC_LINK_CXX_STDLIB=ON -DLLVM_ENABLE_TERMINFO=OFF \
+      -DLLVM_ENABLE_ZSTD=OFF -DLLVM_PARALLEL_LINK_JOBS=1 -DVERILATOR_DISABLE=ON \
+      -DCIRCT_RELEASE_TAG_ENABLED=ON -DCIRCT_RELEASE_TAG=firtool \
+      -DCMAKE_C_COMPILER="${cc}" -DCMAKE_CXX_COMPILER="${cxx}" \
+      -DCMAKE_INSTALL_PREFIX="${dest}" > "${work}/configure.log" 2>&1; then
+    tail -30 "${work}/configure.log" >&2
+    echo "configurazione di firtool fallita (log completo: ${work}/configure.log)" >&2
+    exit 1
+  fi
+
+  log "firtool ${FIRTOOL_VERSION}: compilazione di LLVM+MLIR+CIRCT, tipicamente 20-60 minuti"
+  log "  log completo: ${work}/build.log"
+  ninja -C "${work}/build" -j "${jobs}" install-firtool > "${work}/build.log" 2>&1 &
+  pid=$!
+  while kill -0 "${pid}" 2>/dev/null; do
+    sleep 60
+    printf '  … %s\n' "$(grep -o '^\[[0-9]*/[0-9]*\]' "${work}/build.log" | tail -1)"
+  done
+  if ! wait "${pid}"; then
+    tail -40 "${work}/build.log" >&2
+    echo "compilazione di firtool fallita (log: ${work}/build.log). Rilanciando lo script" \
+         "la build riprende da dove si è fermata." >&2
+    exit 1
+  fi
+  if ! firtool_ok "${dest}/bin"; then
+    echo "firtool compilato, ma non si dichiara ${FIRTOOL_VERSION}:" \
+         "$("${dest}/bin/firtool" --version 2>&1 | grep CIRCT)" >&2
+    exit 1
+  fi
+  if [[ ${KEEP_BUILD} -eq 0 ]]; then
+    rm -rf "${work}"
+  fi
+}
+
+FIRTOOL_BIN_DIR=""
+if [[ -n "${FIRTOOL_PATH_ARG}" ]]; then
+  if ! firtool_ok "${FIRTOOL_PATH_ARG}"; then
+    echo "--firtool-path ${FIRTOOL_PATH_ARG}: serve la cartella che contiene firtool" \
+         "${FIRTOOL_VERSION} (\`firtool --version\` deve stampare 'CIRCT firtool-${FIRTOOL_VERSION}')" >&2
+    exit 1
+  fi
+  FIRTOOL_BIN_DIR="$(cd "${FIRTOOL_PATH_ARG}" && pwd)"
+elif [[ "${CS_ARCH}" == "aarch64" || ${BUILD_FIRTOOL} -eq 1 ]]; then
+  FIRTOOL_BIN_DIR="${PREFIX}/firtool-${FIRTOOL_VERSION}/bin"
+  if ! firtool_ok "${FIRTOOL_BIN_DIR}"; then
+    build_firtool "${PREFIX}/firtool-${FIRTOOL_VERSION}"
+  fi
+fi
+if [[ -n "${FIRTOOL_BIN_DIR}" ]]; then
+  ok "firtool ${FIRTOOL_VERSION} in ${FIRTOOL_BIN_DIR} (CHISEL_FIRTOOL_PATH)"
+fi
+
 # ------------------------------------------------------------------- env.sh
 # NB: si espone solo oss-cad-suite/bin, NON il suo `environment` completo, che
 # sostituirebbe anche python3 e altri tool di sistema.
@@ -137,6 +318,12 @@ export PATH="${BIN}:\${JAVA_HOME}/bin:${PREFIX}/oss-cad-suite/bin:\${PATH}"
 # Chisel/firtool e sbt scrivono qui le cache (riusate offline)
 export COURSIER_CACHE="\${COURSIER_CACHE:-\${HOME}/.cache/coursier}"
 EOF
+if [[ -n "${FIRTOOL_BIN_DIR}" ]]; then
+  cat >> "${PREFIX}/env.sh" <<EOF
+# firtool ${FIRTOOL_VERSION} locale (Chisel 6.6 non ne distribuisce uno per ${ARCH})
+export CHISEL_FIRTOOL_PATH="${FIRTOOL_BIN_DIR}"
+EOF
+fi
 ok "ambiente in ${PREFIX}/env.sh"
 if [[ ${ADD_BASHRC} -eq 1 ]] && ! grep -qF "${PREFIX}/env.sh" "${HOME}/.bashrc" 2>/dev/null; then
   echo "source ${PREFIX}/env.sh" >> "${HOME}/.bashrc"
