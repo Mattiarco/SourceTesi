@@ -85,6 +85,11 @@ class Workflow:
     # ------------------------------------------------------------------- run
     def run(self) -> RunResult:
         self._workdir: Path | None = None
+        # metriche per la campagna sperimentale (bench.py legge report.json)
+        self.rounds_used = 0
+        self.first_failure_stage: str | None = None
+        self.round_history: list[dict] = []
+        self.toolchain_seconds = 0.0
         try:
             return self._run()
         finally:
@@ -199,6 +204,8 @@ class Workflow:
         causes: list[str] = []
         for rnd in range(cfg.max_fix_rounds + 1):
             self.log.stage("tester", f"round {rnd}: scrittura progetto ed esecuzione toolchain…")
+            self.rounds_used = rnd
+            t_tc = time.time()
             try:
                 tres = tester.run(plan, files, cfg.num_random_vectors, cfg.vector_seed, round_id=rnd)
             except LLMError as e:
@@ -209,8 +216,17 @@ class Workflow:
                 self._finalize(workdir, plan, files, False, msg)
                 return RunResult(False, plan, files, workdir, rnd, msg,
                                  self.trace, self._stats())
+            # il tempo del Tester include la sua eventuale diagnosi LLM, già
+            # contata in llm_stats: qui interessa il totale per round
+            self.toolchain_seconds += time.time() - t_tc
             last_report = tres.payload
             self._physical = last_report.physical if last_report else {}
+            if last_report is not None:
+                fail = last_report.first_failure
+                self.round_history.append({"round": rnd, "summary": last_report.summary(),
+                                           "failed_stage": fail.stage if fail else None})
+                if fail is not None and self.first_failure_stage is None:
+                    self.first_failure_stage = fail.stage
             self._t("tester", "toolchain", round=rnd,
                     summary=last_report.summary() if last_report else "")
 
@@ -399,7 +415,19 @@ class Workflow:
             "request": self.cfg.request,
             "config": self.cfg.to_dict(),
             "files": [f.path for f in files],
+            "kernel": plan.get("test_plan", {}).get("kernel"),
+            "clocking": plan.get("clocking"),
+            "testbench": plan.get("testbench"),
+            "ports_overridden": plan.get("ports_overridden", []),
             "few_shot_reference": getattr(self, "few_shot_reference", None),
+            # round 0 = prima verifica; N = numero di round di fix effettivamente usati
+            "fix_rounds": getattr(self, "rounds_used", 0),
+            "first_failure_stage": getattr(self, "first_failure_stage", None),
+            "rounds": getattr(self, "round_history", []),
+            "timing_s": {"total": round(time.time() - self.log.t0, 1),
+                         "toolchain": round(getattr(self, "toolchain_seconds", 0.0), 1),
+                         **{role: round(p.stats["seconds"], 1)
+                            for role, p in self.providers.items()}},
             "llm": {role: p.meta() for role, p in self.providers.items()},
             "llm_stats": self._stats(),
             "physical": getattr(self, "_physical", {}),
