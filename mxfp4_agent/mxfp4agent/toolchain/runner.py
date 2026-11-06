@@ -59,7 +59,7 @@ class ToolchainReport:
 class ToolchainRunner:
     """Guida il progetto generato attraverso sbt e Verilator."""
 
-    def __init__(self, root: Path, module: str, meta_hdl: str = "chisel",
+    def __init__(self, root: Path, module: str,
                  sbt_timeout: int = 1800, verilator_timeout: int = 900,
                  sim_timeout: int = 300, synth: bool = True,
                  target_mhz: float = 100.0, synth_timeout: int = 900) -> None:
@@ -68,7 +68,6 @@ class ToolchainRunner:
         # non troverebbe l'RTL appena generato.
         self.root = Path(root).resolve()
         self.module = module
-        self.meta_hdl = meta_hdl
         self.sbt_timeout = sbt_timeout
         self.verilator_timeout = verilator_timeout
         self.sim_timeout = sim_timeout
@@ -95,9 +94,6 @@ class ToolchainRunner:
 
     # ------------------------------------------------------------- 1. elabora
     def elaborate(self) -> StageResult:
-        if self.meta_hdl != "chisel":
-            return StageResult("elaborate", True, "RTL scritto direttamente, nessuna elaborazione.",
-                               skipped=True)
         if not which("sbt"):
             return StageResult("elaborate", False,
                                "`sbt` non trovato nel PATH. Installa sbt + JDK 17 "

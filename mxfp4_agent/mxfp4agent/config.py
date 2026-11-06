@@ -15,7 +15,6 @@ PROFILE_KEYS = ("model", "num_ctx", "temperature", "max_tokens", "keep_alive", "
 class Config:
     # --- richiesta
     request: str = ""
-    target: str | None = None          # None = decide il Planner; "chisel" | "systemverilog"
     block_size: int = 32
 
     # --- LLM

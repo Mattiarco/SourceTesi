@@ -1,7 +1,7 @@
 """Agente PLANNER — dalla richiesta in linguaggio naturale al piano + prompt.
 
 Fa due cose:
-1. sceglie il Meta-HDL e produce una micro-architettura in JSON;
+1. produce una micro-architettura Chisel in JSON;
 2. **compila il prompt di implementazione** che verra' dato al Coder — è questo
    il "prompt engineering automatico" richiesto dal progetto.
 """
@@ -26,8 +26,7 @@ Rispondi SEMPRE e SOLO con un singolo oggetto JSON, senza testo prima o dopo.
 Schema richiesto:
 {
   "module_name": "IdentificatoreCamelCase",
-  "meta_hdl": "chisel" | "systemverilog",
-  "rationale": "perche' questo Meta-HDL e questa micro-architettura",
+  "rationale": "perche' questa micro-architettura",
   "clocking": "combinational" | "sequential",
   "latency_cycles": <int, 0 se combinatorio>,
   "parameters": [{"name": "...", "value": <int>, "description": "..."}],
@@ -57,9 +56,7 @@ class PlannerAgent(Agent):
     name = "planner"
     system_prompt = SYSTEM
 
-    def run(self, user_request: str, target_hint: str | None = None,
-            block_size: int = 32) -> AgentResult:
-        hint = f"\nMeta-HDL imposto dall'utente: {target_hint}." if target_hint else ""
+    def run(self, user_request: str, block_size: int = 32) -> AgentResult:
         prompt = f"""{MXFP4_SPEC}
 
 ### RICHIESTA UTENTE
@@ -70,7 +67,8 @@ class PlannerAgent(Agent):
 - Il modulo sara' verificato con Verilator contro un golden model Python.
 - Packing: elemento i nei bit [4*i+3 : 4*i] del vettore di ingresso.
 - Il testbench legge i vettori attesi da un header C generato automaticamente,
-  quindi le porte devono essere poche, larghe e con semantica esplicita.{hint}
+  quindi le porte devono essere poche, larghe e con semantica esplicita.
+- Il Meta-HDL e' sempre Chisel 6.
 
 Produci ora il piano JSON."""
 
@@ -83,16 +81,15 @@ Produci ora il piano JSON."""
             if plan is None:
                 self.log.fail(f"planner: JSON non valido (tentativo {attempt + 1})")
                 continue
-            plan = self._normalize(plan, block_size, target_hint)
+            plan = self._normalize(plan, block_size)
             return AgentResult(True, plan, text)
         return AgentResult(False, None, "", f"Piano non parsabile: {last_err}")
 
     # ------------------------------------------------------------- normalize
     @staticmethod
-    def _normalize(plan: dict, block_size: int, target_hint: str | None) -> dict:
+    def _normalize(plan: dict, block_size: int) -> dict:
         plan["module_name"] = sanitize_identifier(plan.get("module_name", ""))
-        hdl = (target_hint or plan.get("meta_hdl") or "chisel").lower()
-        plan["meta_hdl"] = "chisel" if hdl.startswith("chi") else "systemverilog"
+        plan["meta_hdl"] = "chisel"   # unico Meta-HDL supportato; il campo resta per i report
         plan.setdefault("clocking", "combinational")
         plan.setdefault("latency_cycles", 0 if plan["clocking"] == "combinational" else 1)
         plan.setdefault("ports", [])
@@ -116,14 +113,14 @@ Produci ora il piano JSON."""
         )
         steps = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(plan.get("algorithm", [])))
         num = plan.get("numerics", {})
-        return f"""{full_context(plan['meta_hdl'])}
+        return f"""{full_context()}
 
 ### RICHIESTA ORIGINALE DELL'UTENTE
 {user_request}
 
 ### PIANO APPROVATO (da implementare alla lettera)
 Modulo        : {plan['module_name']}
-Meta-HDL      : {plan['meta_hdl']}
+Meta-HDL      : Chisel 6
 Clocking      : {plan['clocking']} (latenza {plan.get('latency_cycles', 0)} cicli)
 Block size K  : {plan['block_size']}
 Motivazione   : {plan.get('rationale', '')}

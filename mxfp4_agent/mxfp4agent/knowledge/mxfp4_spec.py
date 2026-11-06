@@ -103,17 +103,6 @@ CHISEL_RULES = r"""
     `.litValue` su segnali non costanti, `when` senza `.otherwise` su output.
 """
 
-VERILOG_RULES = r"""
-### REGOLE SYSTEMVERILOG — vincolanti
-1. `module <Nome> ( ... );` con porte ANSI e tipi espliciti (`logic`).
-2. Sempre `always_comb` / `always_ff @(posedge clk)`; mai `always @(*)` misto.
-3. Nessun latch: in `always_comb` assegna un default a tutti gli output.
-4. Reset attivo alto sincrono `rst` salvo diversa indicazione.
-5. Niente costrutti non supportati da Verilator (`#delay` nella logica,
-   `initial` in RTL sintetizzabile, `real`).
-6. Larghezze esplicite ovunque; niente conversioni implicite firmate/non firmate.
-"""
-
 CHISEL_TB_PORTS = r"""
 ### NOMI DELLE PORTE NEL TESTBENCH (Chisel) — CAUSA DI ERRORE PIU' FREQUENTE
 
@@ -143,9 +132,6 @@ Nel testbench di un modulo combinatorio mettili a 0 una volta sola:
 
 (Per un design puramente combinatorio Verilator emette un warning UNUSEDSIGNAL
 su clock/reset: e' atteso e innocuo.)
-
-Se invece il target e' SystemVerilog scritto a mano, le porte hanno esattamente
-il nome che hai dato tu, senza alcun prefisso.
 """
 
 VERILATOR_TB_RULES = r"""
@@ -158,10 +144,12 @@ VERILATOR_TB_RULES = r"""
      Verilated::commandArgs(argc, argv);
      auto* dut = new V<Nome>;
    Alla fine: `dut->final(); delete dut; return failures ? 1 : 0;`
-3. Se il DUT è sequenziale definisci un helper:
-     auto tick = [&]{ dut->clk = 0; dut->eval(); dut->clk = 1; dut->eval(); };
-   e applica il reset per almeno 2 cicli prima dei vettori.
-   Se è puramente combinatorio NON pilotare clk/rst: basta `dut->eval()`.
+3. Se il DUT è sequenziale definisci un helper (le porte Chisel si chiamano
+   `clock` e `reset`, senza prefisso `io_`):
+     auto tick = [&]{ dut->clock = 0; dut->eval(); dut->clock = 1; dut->eval(); };
+   e tieni `reset = 1` per almeno 2 cicli prima dei vettori.
+   Se è puramente combinatorio metti `clock = 0`, `reset = 0` una volta e usa
+   solo `dut->eval()`.
 4. I vettori di test attesi arrivano dal golden model Python e sono inclusi come
    `#include "test_vectors.h"` (array C generato automaticamente). NON
    ricalcolare la semantica MXFP4 in C++: usa i valori attesi forniti.
@@ -202,11 +190,7 @@ COMMON_PITFALLS = r"""
 """
 
 
-def full_context(target: str = "chisel") -> str:
-    """Blocco di conoscenza completo da iniettare nei prompt."""
-    if target == "chisel":
-        hdl, tb_ports = CHISEL_RULES, CHISEL_TB_PORTS
-    else:
-        hdl, tb_ports = VERILOG_RULES, ""
-    parts = [MXFP4_SPEC, hdl, VERILATOR_TB_RULES, tb_ports, COMMON_PITFALLS]
-    return "\n".join(p for p in parts if p)
+def full_context() -> str:
+    """Blocco di conoscenza completo da iniettare nei prompt (il Meta-HDL è Chisel)."""
+    return "\n".join([MXFP4_SPEC, CHISEL_RULES, VERILATOR_TB_RULES, CHISEL_TB_PORTS,
+                      COMMON_PITFALLS])

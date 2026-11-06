@@ -16,7 +16,7 @@ BANNER = r"""
   __  ____  __ _____ ____  _  _
  |  \/  \ \/ /|  ___|  _ \| || |    Meta-HDL agentic generator
  | |\/| |\  /\| |_  | |_) | || |_   Planner → Coder → Reviewer → Tester
- |_|  |_|/_/\_\_|   |  __/|__   _|  Chisel/SystemVerilog + Verilator
+ |_|  |_|/_/\_\_|   |  __/|__   _|  Chisel + Verilator + Yosys/nextpnr
                     |_|      |_|
 """
 
@@ -34,13 +34,13 @@ def _keep_alive(v: str | None):
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mxfp4-agent",
-        description="Genera unità aritmetiche MXFP4 in Chisel/SystemVerilog con un "
+        description="Genera unità aritmetiche MXFP4 in Chisel con un "
                     "workflow multi-agente e le verifica con Verilator.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""esempi:
   mxfp4-agent "unità dot-product MXFP4 a 32 elementi, combinatoria"
   mxfp4-agent "MAC MXFP4 pipelined a 2 stadi con accumulo FP32" --coder-model qwen2.5-coder:32b
-  mxfp4-agent "moltiplicatore element-wise MXFP4" --target systemverilog
+  mxfp4-agent "moltiplicatore element-wise MXFP4" --profiles profiles.json
   mxfp4-agent --doctor                 # verifica ambiente
   mxfp4-agent --selftest               # smoke test offline (provider mock)
 """)
@@ -73,8 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="profili per agente, es. {\"planner\": {\"model\": \"qwen2.5-coder:32b\"}}")
 
     d = p.add_argument_group("design")
-    d.add_argument("--target", choices=["chisel", "systemverilog"],
-                   help="forza il Meta-HDL (default: lo sceglie il Planner)")
     d.add_argument("-k", "--block-size", type=int, default=32)
 
     w = p.add_argument_group("workflow")
@@ -140,7 +138,7 @@ def cmd_resume(args) -> int:
         print(f"plan.json non trovato in {root}", file=sys.stderr)
         return 2
     plan = json.loads(plan_file.read_text(encoding="utf-8"))
-    runner = ToolchainRunner(root, plan["module_name"], plan["meta_hdl"],
+    runner = ToolchainRunner(root, plan["module_name"],
                              synth=not args.no_synth, target_mhz=args.target_mhz)
     rep = runner.run_all()
     for s in rep.stages:
@@ -179,7 +177,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         cfg = Config(
             request=request.strip(),
-            target=args.target,
             block_size=args.block_size,
             provider="mock" if args.selftest else args.provider,
             model=args.model,

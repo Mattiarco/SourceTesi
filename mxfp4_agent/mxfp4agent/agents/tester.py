@@ -50,8 +50,7 @@ class TesterAgent(Agent):
     def materialize(self, plan: dict, files: list[ExtractedFile],
                     num_random: int = 64, seed: int = 1234) -> int:
         """Scrive scaffold + file generati + header dei vettori. Ritorna #vettori."""
-        module, hdl = plan["module_name"], plan["meta_hdl"]
-        scaffold(self.workdir, module, hdl)
+        scaffold(self.workdir, plan["module_name"])
         for f in files:
             p = self.workdir / f.path
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +63,7 @@ class TesterAgent(Agent):
 
     # -------------------------------------------------------------- toolchain
     def run_toolchain(self, plan: dict, round_id: int = 0) -> ToolchainReport:
-        runner = ToolchainRunner(self.workdir, plan["module_name"], plan["meta_hdl"],
+        runner = ToolchainRunner(self.workdir, plan["module_name"],
                                  synth=self.synth, target_mhz=self.target_mhz)
         rep = runner.run_all()
 
@@ -95,7 +94,7 @@ class TesterAgent(Agent):
         fail = report.first_failure
         if fail is None:
             return AgentResult(True, None, "", "nessun fallimento da diagnosticare")
-        prompt = f"""Modulo: {plan['module_name']} ({plan['meta_hdl']})
+        prompt = f"""Modulo: {plan['module_name']} (Chisel)
 Fase fallita: {fail.stage}
 Kernel di test: {plan.get('test_plan', {}).get('kernel')}
 

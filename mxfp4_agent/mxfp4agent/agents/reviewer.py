@@ -14,7 +14,7 @@ from .base import Agent, AgentResult
 from .schemas import REVIEW_SCHEMA
 
 SYSTEM = """Sei il REVIEWER & FIXER di un sistema agentico per Meta-HDL, esperto di
-Chisel, SystemVerilog, Verilator e formati microscaling (MXFP4/NVFP4).
+Chisel 6, Verilator e formati microscaling (MXFP4/NVFP4).
 
 Hai due modalita', indicate dal prompt:
 
@@ -55,7 +55,7 @@ class ReviewerAgent(Agent):
     def review(self, plan: dict, files: list[ExtractedFile]) -> AgentResult:
         prompt = f"""[REVIEW]
 
-{full_context(plan['meta_hdl'])}
+{full_context()}
 
 ### PIANO
 {self._fmt_json({k: v for k, v in plan.items() if k != 'coder_prompt'}, 3000)}
@@ -96,7 +96,7 @@ Emetti il JSON di review."""
 
         prompt = f"""[FIX] Tentativo {attempt}. Fase fallita: **{stage}**.
 
-{full_context(plan['meta_hdl'])}
+{full_context()}
 
 {HEADER_CONTRACT}
 {issue_txt}{history_txt}

@@ -90,19 +90,19 @@ class Workflow:
         reviewer = ReviewerAgent(self.providers["reviewer"], self.log)
 
         # ---------------------------------------------------------- PLANNER
-        self.log.stage("planner", "analisi della richiesta e scelta del Meta-HDL…")
+        self.log.stage("planner", "analisi della richiesta e micro-architettura…")
         try:
-            pres = planner.run(cfg.request, cfg.target, cfg.block_size)
+            pres = planner.run(cfg.request, cfg.block_size)
         except LLMError as e:
             return RunResult(False, message=str(e))
         if not pres.ok:
             self._t("planner", "failed", note=pres.notes)
             return RunResult(False, message=pres.notes, trace=self.trace)
         plan = pres.payload
-        self.log.ok(f"{plan['module_name']} in {plan['meta_hdl']} "
+        self.log.ok(f"{plan['module_name']} "
                     f"({plan['clocking']}, K={plan['block_size']})")
         self.log.info(f"kernel di test: {plan['test_plan']['kernel']}")
-        self._t("planner", "plan", module=plan["module_name"], hdl=plan["meta_hdl"])
+        self._t("planner", "plan", module=plan["module_name"])
 
         workdir = Path(cfg.outdir) / plan["module_name"]
         tester = TesterAgent(self.providers["tester"], self.log, workdir,
@@ -281,8 +281,7 @@ class Workflow:
     @staticmethod
     def _readme(plan: dict, files, ok: bool, message: str) -> str:
         flist = "\n".join(f"- `{f.path}`" for f in files)
-        cmd = ("sbt \"runMain mxfp4.Elaborate\"   # Chisel -> SystemVerilog\n"
-               if plan["meta_hdl"] == "chisel" else "")
+        cmd = "sbt \"runMain mxfp4.Elaborate\"   # Chisel -> SystemVerilog\n"
         return f"""# {plan['module_name']} — unità aritmetica MXFP4
 
 Generato automaticamente dalla pipeline agentica (Planner → Coder → Reviewer → Tester).

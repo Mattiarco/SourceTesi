@@ -47,8 +47,3 @@ python run.py "<incolla qui la richiesta>"
 > Accumulatore MXFP4 che somma i dot-product di N blocchi consecutivi in un
 > accumulatore FP32, con interfaccia streaming (valid/last) e reset
 > dell'accumulo su `start`.
-
-## 7. Variante SystemVerilog
-
-> Come la richiesta 1, ma in SystemVerilog puro (`--target systemverilog`),
-> pensata per essere integrata in un pipeline esistente senza toolchain Scala.

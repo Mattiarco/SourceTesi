@@ -30,7 +30,6 @@ PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "module_name": _STR,
-        "meta_hdl": {"type": "string", "enum": ["chisel", "systemverilog"]},
         "rationale": _STR,
         "clocking": {"type": "string", "enum": ["combinational", "sequential"]},
         "latency_cycles": _INT,

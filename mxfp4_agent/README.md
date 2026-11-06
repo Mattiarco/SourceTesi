@@ -1,7 +1,7 @@
 # MXFP4 Meta-HDL Agent
 
 Pipeline agentica che trasforma una richiesta in linguaggio naturale in una
-**unità aritmetica MXFP4** descritta in **Chisel** (o SystemVerilog), completa di
+**unità aritmetica MXFP4** descritta in **Chisel 6**, completa di
 **testbench Verilator** e verificata contro un **golden model Python**.
 
 Riferimento: *An agentic-driven approach for Meta-HDL* — coprocessore MXFP4/NVFP4
@@ -63,8 +63,8 @@ python run.py --doctor
 # Ollama locale (default)
 python run.py "unità dot-product MXFP4 a 32 elementi, combinatoria"
 
-# forzare il Meta-HDL e la dimensione del blocco
-python run.py "moltiplicatore element-wise MXFP4" --target systemverilog -k 32
+# dimensione del blocco
+python run.py "moltiplicatore element-wise MXFP4" -k 32
 
 # modelli diversi per agente (planner grande, coder specializzato)
 python run.py "..." --provider ollama \
@@ -108,7 +108,7 @@ make run                         # verilator: build + simulazione
 
 | agente | input | output | note |
 |---|---|---|---|
-| **Planner** | richiesta utente + spec MXFP4 | `plan.json` + **prompt compilato** per il Coder | sceglie il Meta-HDL, dimensiona l'accumulatore, definisce il piano di test |
+| **Planner** | richiesta utente + spec MXFP4 | `plan.json` + **prompt compilato** per il Coder | definisce porte e micro-architettura Chisel, dimensiona l'accumulatore, definisce il piano di test |
 | **Coder** | prompt compilato + contratto dell'header | design + testbench C++ | emette sempre file interi, mai diff |
 | **Reviewer/Fixer** | codice, log di sbt/Verilator | review JSON o file corretti | non può toccare `test_vectors.h` |
 | **Tester** | piano + file | progetto su disco, esito toolchain, diagnosi | genera i vettori, esegue elaborate → lint → build → simulate |

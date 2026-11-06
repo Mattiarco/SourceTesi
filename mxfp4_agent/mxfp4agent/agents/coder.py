@@ -1,4 +1,4 @@
-"""Agente CODER — implementa il piano in Chisel/SystemVerilog + testbench C++."""
+"""Agente CODER — implementa il piano in Chisel + testbench C++."""
 from __future__ import annotations
 
 from ..knowledge.reference_design import REFERENCE_CHISEL
@@ -32,17 +32,12 @@ class CoderAgent(Agent):
 
     def run(self, plan: dict, compiled_prompt: str, few_shot: bool = False) -> AgentResult:
         module = plan["module_name"]
-        if plan["meta_hdl"] == "chisel":
-            src_path = f"src/main/scala/mxfp4/{module}.scala"
-            lang = "scala"
-            layout = (f"1. `{src_path}` — package `mxfp4`, classe `class {module}(...) extends Module`.\n"
-                      f"   NON includere `object {module}Main`: l'elaborazione e' gia' predisposta\n"
-                      f"   e istanzia il modulo come `new {module}()`, quindi TUTTI i parametri\n"
-                      f"   del costruttore devono avere un valore di default.")
-        else:
-            src_path = f"rtl/{module}.sv"
-            lang = "systemverilog"
-            layout = f"1. `{src_path}` — `module {module} ( ... ); ... endmodule`."
+        src_path = f"src/main/scala/mxfp4/{module}.scala"
+        lang = "scala"
+        layout = (f"1. `{src_path}` — package `mxfp4`, classe `class {module}(...) extends Module`.\n"
+                  f"   NON includere `object {module}Main`: l'elaborazione e' gia' predisposta\n"
+                  f"   e istanzia il modulo come `new {module}()`, quindi TUTTI i parametri\n"
+                  f"   del costruttore devono avere un valore di default.")
 
         tb_path = f"sim/tb_{module}.cpp"
         example = ""
@@ -73,34 +68,31 @@ Scrivi ora i due file nel formato richiesto (linguaggio del primo fence: `{lang}
         if not files:
             return AgentResult(False, None, text, "Il Coder non ha prodotto file estraibili.")
 
-        files = self._retarget(files, module, plan["meta_hdl"])
-        missing = self._missing(files, plan["meta_hdl"])
+        files = self._retarget(files)
+        missing = self._missing(files)
         if missing:
             return AgentResult(False, files, text, f"File mancanti: {', '.join(missing)}")
         return AgentResult(True, files, text)
 
     # ------------------------------------------------------------- normalize
     @staticmethod
-    def _retarget(files, module: str, hdl: str):
+    def _retarget(files):
         """Riporta i percorsi nella struttura attesa dal build system."""
         for f in files:
             p = f.path.replace("\\", "/").lstrip("./")
             if p.endswith(".scala") and not p.startswith("src/main/scala/"):
                 p = f"src/main/scala/mxfp4/{p.rsplit('/', 1)[-1]}"
-            elif p.endswith((".sv", ".v")) and not p.startswith("rtl/"):
-                p = f"rtl/{p.rsplit('/', 1)[-1]}"
             elif p.endswith((".cpp", ".cc")) and not p.startswith("sim/"):
                 p = f"sim/{p.rsplit('/', 1)[-1]}"
             f.path = p
         return files
 
     @staticmethod
-    def _missing(files, hdl: str) -> list[str]:
+    def _missing(files) -> list[str]:
         exts = {f.ext for f in files}
-        need_src = ".scala" if hdl == "chisel" else ".sv"
         missing = []
-        if need_src not in exts and not (need_src == ".sv" and ".v" in exts):
-            missing.append(f"sorgente {need_src}")
+        if ".scala" not in exts:
+            missing.append("sorgente .scala")
         if ".cpp" not in exts:
             missing.append("testbench .cpp")
         return missing

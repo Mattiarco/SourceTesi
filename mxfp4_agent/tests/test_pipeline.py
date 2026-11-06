@@ -72,11 +72,11 @@ def test_chisel_port_prefix_rule_is_in_the_prompt():
     """Chisel appiattisce `io` in `io_<nome>`: senza questa regola il tb non compila."""
     from mxfp4agent.knowledge import full_context
 
-    chisel = full_context("chisel")
+    chisel = full_context()
     assert "io_" in chisel and "appiattisce" in chisel
     assert "clock" in chisel and "reset" in chisel
-    # per SystemVerilog scritto a mano la regola NON deve comparire: confonderebbe
-    assert "appiattisce" not in full_context("systemverilog")
+    # le regole del testbench non devono contraddire le porte Chisel (clock/reset)
+    assert "dut->clk" not in chisel and "SystemVerilog scritto a mano" not in chisel
 
 
 def test_reference_testbench_uses_io_prefix():
@@ -103,10 +103,21 @@ def test_planner_parses_mock_plan():
     assert res.payload["test_plan"]["kernel"] == "dot_product"
 
 
-def test_planner_target_hint_overrides():
-    planner = PlannerAgent(build_provider("mock"), Log(False, False))
-    res = planner.run("qualcosa", target_hint="systemverilog")
-    assert res.payload["meta_hdl"] == "systemverilog"
+def test_planner_always_targets_chisel():
+    """Anche se il modello prova a proporre SystemVerilog, il piano resta Chisel."""
+    from mxfp4agent.agents.schemas import PLAN_SCHEMA
+
+    plan = PlannerAgent._normalize({"module_name": "X", "meta_hdl": "systemverilog"}, 32)
+    assert plan["meta_hdl"] == "chisel"
+    assert "meta_hdl" not in PLAN_SCHEMA["properties"]
+
+
+def test_scaffold_is_chisel_only(tmp_path):
+    from mxfp4agent.toolchain.scaffold import scaffold
+
+    scaffold(tmp_path, "Foo")
+    assert (tmp_path / "build.sbt").exists()
+    assert "new Foo()" in (tmp_path / "src/main/scala/mxfp4/Elaborate.scala").read_text()
 
 
 def test_compiled_prompt_contains_domain_knowledge():
@@ -306,7 +317,7 @@ def test_chisel_shift_rule_is_documented():
     """Il 14B ha bruciato 4 round su `SInt >> SInt`."""
     from mxfp4agent.knowledge import full_context
 
-    ctx = full_context("chisel")
+    ctx = full_context()
     assert "MAI `SInt`" in ctx
     assert "cannot be applied to (chisel3.SInt)" in ctx
     assert "Mux(sh < 0.S" in ctx
@@ -339,7 +350,7 @@ def test_coder_is_told_not_to_write_an_elaboration_entrypoint():
     """Il Fixer aveva aggiunto un `object ...Main` seguendo una regola ambigua."""
     from mxfp4agent.knowledge import full_context
 
-    ctx = full_context("chisel")
+    ctx = full_context()
     assert "NON scrivere alcun entry-point" in ctx
     assert "_root_.circt.stage.ChiselStage" in ctx
     assert "(-3).S(5.W)" in ctx      # trappola dei letterali negativi

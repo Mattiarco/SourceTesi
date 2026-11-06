@@ -95,18 +95,6 @@ def scaffold_chisel(root: Path, module: str) -> None:
     (root / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
 
 
-def scaffold_verilog(root: Path, module: str) -> None:
-    (root / "rtl").mkdir(parents=True, exist_ok=True)
-    (root / "sim").mkdir(parents=True, exist_ok=True)
-    mk = MAKEFILE.format(module=module).replace(
-        'rtl:\n\tsbt "runMain mxfp4.Elaborate"', "rtl:\n\t@echo 'RTL scritto direttamente in rtl/'")
-    (root / "Makefile").write_text(mk, encoding="utf-8")
-    (root / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
-
-
-def scaffold(root: Path, module: str, meta_hdl: str) -> None:
+def scaffold(root: Path, module: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    if meta_hdl == "chisel":
-        scaffold_chisel(root, module)
-    else:
-        scaffold_verilog(root, module)
+    scaffold_chisel(root, module)
