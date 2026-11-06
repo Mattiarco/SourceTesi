@@ -32,8 +32,9 @@ python run.py "<incolla qui la richiesta>"
 
 > Unità di conversione da un blocco MXFP4 (32 elementi + scala E8M0) a 32 valori
 > bfloat16. Poiché la scala è una potenza di due, la conversione deve essere una
-> pura ricomposizione di campi: nessun moltiplicatore. Gestire la saturazione
-> dell'esponente BF16 e il caso scala = 0xFF (NaN).
+> pura ricomposizione di campi: nessun moltiplicatore. Gestire l'overflow
+> dell'esponente BF16 (risultato ±inf), i subnormali BF16 e il caso scala = 0xFF
+> (NaN).
 
 ## 5. Quantizzatore FP32 → MXFP4
 

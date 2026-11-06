@@ -15,9 +15,9 @@ def _plan(kernel, clocking):
     return {"module_name": "X", "clocking": clocking, "test_plan": {"kernel": kernel}}
 
 
-def test_the_three_references_are_found():
+def test_the_four_references_are_found():
     keys = [r.key for r in load_references()]
-    assert keys == ["01_dot_product", "02_pipelined", "03_elementwise"], keys
+    assert keys == ["01_dot_product", "02_pipelined", "03_elementwise", "04_to_bf16"], keys
 
 
 def test_selection_follows_kernel_then_clocking():
@@ -26,6 +26,7 @@ def test_selection_follows_kernel_then_clocking():
     assert select_reference(_plan("elementwise_mul", "combinational")).key == "03_elementwise"
     # stessa famiglia element-wise, kernel diverso
     assert select_reference(_plan("elementwise_add", "sequential")).key == "03_elementwise"
+    assert select_reference(_plan("to_bf16", "combinational")).key == "04_to_bf16"
     # kernel sconosciuto: decide il clocking
     assert select_reference(_plan("custom", "sequential")).key == "02_pipelined"
 

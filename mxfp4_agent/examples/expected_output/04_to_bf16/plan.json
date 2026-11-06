@@ -1,0 +1,41 @@
+{
+  "module_name": "MXFP4ToBF16",
+  "meta_hdl": "chisel",
+  "rationale": "Ogni magnitudine E2M1 non nulla e' 2^e * 1.f con un solo bit di mantissa e la scala E8M0 e' una potenza di due: la conversione in bfloat16 e' una ricomposizione di campi (somma di esponenti + selezione), sempre esatta, senza moltiplicatori.",
+  "clocking": "combinational",
+  "latency_cycles": 0,
+  "block_size": 32,
+  "parameters": [
+    {"name": "k", "value": 32, "description": "elementi per blocco"}
+  ],
+  "ports": [
+    {"name": "a", "dir": "in", "width": 128, "type": "UInt", "description": "blocco A: elemento E2M1 i nei bit [4i+3:4i]"},
+    {"name": "scaleA", "dir": "in", "width": 8, "type": "UInt", "description": "scala E8M0 di A: 2^(scaleA-127), 0xFF = NaN"},
+    {"name": "out", "dir": "out", "width": 512, "type": "UInt", "description": "k valori bfloat16; elemento i nei bit [16i+15:16i]"},
+    {"name": "isNaN", "dir": "out", "width": 1, "type": "Bool", "description": "alto se scaleA vale 0xFF"}
+  ],
+  "algorithm": [
+    "Per ogni elemento: segno = bit 3, m = bit [2:0].",
+    "Da una LUT su m si leggono e+1 in {0,0,1,1,2,2,3,3} e il bit di mantissa f in {0,0,0,1,0,1,0,1}.",
+    "ebP1 = scaleA +& (e+1) = esponente BF16 biased + 1, in [0, 257].",
+    "m == 0: zero con segno. ebP1 >= 256: +/-inf. ebP1 >= 2: normale con esponente ebP1-1 e mantissa f000000.",
+    "ebP1 == 1: subnormale con mantissa 1f00000. ebP1 == 0: subnormale con mantissa 01f0000.",
+    "scaleA == 0xFF: tutti gli elementi valgono 0x7FC0 e isNaN e' alto."
+  ],
+  "numerics": {
+    "accumulator_width": 9,
+    "rounding": "nessuno: la conversione e' esatta in tutto il dominio",
+    "saturation": "overflow dell'esponente BF16 -> +/-inf",
+    "special_cases": ["zero negativo", "subnormale 0.5 E2M1", "subnormali BF16 con scala piccola", "overflow -> inf", "scala NaN"]
+  },
+  "test_plan": {
+    "kernel": "to_bf16",
+    "num_random": 64,
+    "directed": ["esaustivo: 16 codici x 256 scale"]
+  },
+  "risks": [
+    "trattare l'overflow come saturazione al massimo finito invece di inf",
+    "perdere i subnormali BF16 per scale molto piccole",
+    "invertire l'ordine degli elementi in uscita"
+  ]
+}
