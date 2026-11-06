@@ -8,20 +8,17 @@ frequenza giri. Queste due fasi chiudono il buco:
                 (errore di parsing, latch inferito, anello combinatorio,
                 più driver). Estrae le risorse mappate: LUT4, FF, CCU2C
                 (catene di carry), moltiplicatori MULT18X18D, RAM.
-* ``implement`` nextpnr-ecp5 (place & route) sul netlist di Yosys. Estrae
-                Fmax o ritardo massimo e l'utilizzo post-P&R. È
-                INFORMATIVA: un vincolo di frequenza mancato o un design che
-                non entra nel dispositivo non è un bug da riparare, è un
-                risultato da riportare. Non fa mai fallire la catena.
+* ``implement`` place & route con nextpnr-ecp5, multi-seed, con wrapper a
+                registri: vedi ``physical.py``. È INFORMATIVA: un vincolo di
+                frequenza mancato non è un bug da riparare, è un risultato
+                da riportare. Non fa mai fallire la catena.
 
 Dispositivo di riferimento: Lattice LFE5U-85F (CABGA381, speed grade 6). È un
 FPGA open-source-friendly con LUT4, carry chain e DSP 18x18, abbastanza
 grande per le unità MXFP4 a 32 elementi.
 
-Avvertenza sui design puramente combinatori: non c'è un clock, quindi non
-esiste una Fmax. Si riporta il ritardo massimo ingresso→uscita, che nextpnr
-calcola includendo il routing dai pad (non vincolati, quindi piazzati a
-discrezione del tool): è una stima pessimistica e dipende dal seed.
+Per i design combinatori la Fmax si misura con il wrapper di `regwrap.py`;
+il ritardo pin→pin del DUT nudo si riporta a parte (vedi `physical.py`).
 """
 from __future__ import annotations
 
@@ -153,51 +150,3 @@ def run_synth(root: Path, module: str, rtl_files: list[Path], timeout: int = 900
         resources = {"_parse_error": str(e)[:200]}
     return StageResult("synth", True, f"yosys synth_ecp5 ok — {resources}",
                        detail={"resources_yosys": resources, "netlist": str(netlist)})
-
-
-def run_implement(root: Path, module: str, netlist: Path | None, target_mhz: float = 100.0,
-                  seed: int = 1, timeout: int = 900) -> StageResult:
-    """Place & route con nextpnr-ecp5: Fmax / ritardo massimo e utilizzo.
-
-    Informativa: ritorna sempre ok=True (vedi docstring del modulo).
-    """
-    if not which("nextpnr-ecp5"):
-        return StageResult("implement", True,
-                           "`nextpnr-ecp5` non trovato nel PATH: timing non calcolato "
-                           "(apt install nextpnr-ecp5).", skipped=True)
-    if netlist is None or not Path(netlist).exists():
-        return StageResult("implement", True, "Netlist Yosys assente.", skipped=True)
-
-    out = Path(root) / "synth"
-    plog, prep = out / "nextpnr.log", out / "nextpnr_report.json"
-    for f in (plog, prep):
-        f.unlink(missing_ok=True)
-    cmd = ["nextpnr-ecp5", *DEVICE_ARGS, "--json", str(netlist), "--freq", f"{target_mhz:g}",
-           "--seed", str(seed), "--lpf-allow-unconstrained", "--timing-allow-fail",
-           "--report", str(prep), "-l", str(plog)]
-    r = run(cmd, cwd=root, timeout=timeout)
-    log = plog.read_text(encoding="utf-8", errors="replace") if plog.exists() else r.log
-
-    if not r.ok or not prep.exists():
-        # Tipicamente: il design non entra nel dispositivo, o timeout. È un dato.
-        tail = "\n".join((r.log + "\n" + log).splitlines()[-15:])
-        return StageResult("implement", True, f"place&route non completato:\n{tail}",
-                           detail={"status": "failed", "device": DEVICE_NAME})
-
-    timing = parse_nextpnr_log(log)
-    util = {}
-    try:
-        rep = json.loads(prep.read_text(encoding="utf-8"))
-        util = {k: v for k, v in rep.get("utilization", {}).items() if v.get("used")}
-    except Exception:
-        pass
-    sequential = bool(timing["clocks"])
-    summary = (", ".join(f"{c}: {d['fmax_mhz']:.1f} MHz ({'ok' if d['met'] else 'NO'} a "
-                         f"{d['target_mhz']:g})" for c, d in timing["clocks"].items())
-               if sequential else
-               "; ".join(f"{k}: {v:.2f} ns" for k, v in timing["max_delays_ns"].items())
-               or "nessun cammino temporizzato")
-    return StageResult("implement", True, f"nextpnr-ecp5 {DEVICE_NAME} — {summary}",
-                       detail={"status": "ok", "device": DEVICE_NAME, "seed": seed,
-                               "target_mhz": target_mhz, "sequential": sequential,
-                               "timing": timing, "utilization": util})

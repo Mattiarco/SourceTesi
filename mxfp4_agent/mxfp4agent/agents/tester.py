@@ -46,7 +46,7 @@ class TesterAgent(Agent):
     def __init__(self, provider, log, workdir: Path, synth: bool = True,
                  target_mhz: float = 100.0, lint: bool = True,
                  sbt_mode: str = "auto", trace: bool = False, coverage: bool = False,
-                 **kw) -> None:
+                 pnr_seeds: int = 5, **kw) -> None:
         super().__init__(provider, log, **kw)
         self.workdir = Path(workdir)
         self.synth = synth
@@ -55,6 +55,7 @@ class TesterAgent(Agent):
         self.sbt_mode = sbt_mode
         self.trace = trace
         self.coverage = coverage
+        self.pnr_seeds = pnr_seeds
 
     # ------------------------------------------------------------ filesystem
     def materialize(self, plan: dict, files: list[ExtractedFile],
@@ -96,7 +97,8 @@ class TesterAgent(Agent):
         runner = ToolchainRunner(self.workdir, plan["module_name"],
                                  synth=self.synth, target_mhz=self.target_mhz,
                                  sbt_mode=self.sbt_mode, trace=self.trace,
-                                 coverage=self.coverage)
+                                 coverage=self.coverage, pnr_seeds=self.pnr_seeds,
+                                 plan=plan)
         rep = runner.run_all()
         rep.stages[0:0] = pre or []
         self._write_logs(rep, round_id)

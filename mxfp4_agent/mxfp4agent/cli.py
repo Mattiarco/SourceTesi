@@ -102,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="salta sintesi (Yosys) e implementation con timing (nextpnr)")
     w.add_argument("--target-mhz", type=float, default=100.0,
                    help="frequenza obiettivo per il timing dell'implementation")
+    w.add_argument("--pnr-seeds", type=int, default=5,
+                   help="seed di place & route nextpnr (si riportano mediana, min, max)")
+    w.add_argument("--ppa-rounds", type=int, default=0, metavar="N",
+                   help="dopo la verifica, N varianti ottimizzate per Fmax/area (ognuna deve "
+                        "ripassare tutta la verifica; si tiene la migliore)")
     w.add_argument("-q", "--quiet", action="store_true")
     w.add_argument("-c", "--config", type=Path, help="file JSON di configurazione")
 
@@ -151,7 +156,12 @@ def cmd_resume(args) -> int:
     plan = json.loads(plan_file.read_text(encoding="utf-8"))
     # una sola elaborazione: un server sbt persistente non servirebbe
     runner = ToolchainRunner(root, plan["module_name"], sbt_mode="batch",
-                             synth=not args.no_synth, target_mhz=args.target_mhz)
+                             synth=not args.no_synth, target_mhz=args.target_mhz,
+                             pnr_seeds=args.pnr_seeds, plan=plan)
+    if plan.get("testbench") == "template":
+        from .toolchain.tbgen import render_testbench   # rigenerato: e' deterministico
+        (root / "sim" / f"tb_{plan['module_name']}.cpp").write_text(
+            render_testbench(plan), encoding="utf-8")
     rep = runner.run_all()
     for s in rep.stages:
         state = "SKIP" if s.skipped else ("OK" if s.ok else "FAIL")
@@ -160,10 +170,8 @@ def cmd_resume(args) -> int:
             print(s.log[-4000:])
         elif s.stage in ("synth", "implement") and not s.skipped:
             print("       " + s.log.splitlines()[0])
-    if rep.physical:
-        import json as _json
-        (root / "physical.json").write_text(_json.dumps(rep.physical, indent=2), encoding="utf-8")
-        print(f"\nmetriche fisiche → {root / 'physical.json'}")
+    if rep.physical.get("device"):
+        print(f"\nmetriche fisiche → {root / 'physical.json'} e {root / 'physical.md'}")
     return 0 if rep.ok else 1
 
 
@@ -218,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
             vector_seed=args.vector_seed,
             synth=not args.no_synth,
             target_mhz=args.target_mhz,
+            pnr_seeds=args.pnr_seeds,
+            ppa_rounds=args.ppa_rounds,
             verbose=not args.quiet,
         )
 

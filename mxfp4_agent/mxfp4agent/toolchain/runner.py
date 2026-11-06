@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .shell import CmdResult, run, which
 from .stage import StageResult
-from .synth import run_implement, run_synth
+from .physical import run_physical
+from .synth import run_synth
 
 PASS_RE = re.compile(r"TEST\s+PASSED\s*\((\d+)", re.IGNORECASE)
 FAIL_RE = re.compile(r"TEST\s+FAILED\s*\((\d+)\s*/\s*(\d+)", re.IGNORECASE)
@@ -95,16 +96,12 @@ class ToolchainReport:
 
     @property
     def physical(self) -> dict:
-        """Metriche fisiche (risorse e timing) se le fasi synth/implement sono state eseguite."""
-        out: dict = {}
-        for s in self.stages:
-            if s.skipped:
-                continue
-            if s.stage == "synth" and s.ok:
-                out["synth"] = {"resources_yosys": s.detail.get("resources_yosys", {})}
-            elif s.stage == "implement":
-                out["implement"] = {k: v for k, v in s.detail.items()}
-        return out
+        """Metriche fisiche (vedi physical.py); solo area ECP5 se il P&R non è stato fatto."""
+        impl = next((s for s in self.stages if s.stage == "implement" and not s.skipped), None)
+        if impl is not None and impl.detail.get("device"):
+            return impl.detail
+        syn = next((s for s in self.stages if s.stage == "synth" and s.ok and not s.skipped), None)
+        return {"area_ecp5": syn.detail.get("resources_yosys", {})} if syn else {}
 
     def add(self, s: StageResult) -> StageResult:
         self.stages.append(s)
@@ -142,7 +139,10 @@ class ToolchainRunner:
                  sim_timeout: int = 300, synth: bool = True,
                  target_mhz: float = 100.0, synth_timeout: int = 900,
                  sbt_mode: str = "auto", sbt_client_timeout: int = 420,
-                 trace: bool = False, coverage: bool = False) -> None:
+                 trace: bool = False, coverage: bool = False, pnr_seeds: int = 5,
+                 plan: dict | None = None) -> None:
+        self.pnr_seeds = pnr_seeds
+        self.plan = plan or {}
         self.sbt_mode = sbt_mode
         self.sbt_client_timeout = sbt_client_timeout
         self.trace = trace            # dump VCD in sim/waves.vcd
@@ -309,9 +309,10 @@ class ToolchainRunner:
 
     # ------------------------------------------------------- 6. implementation
     def implement(self) -> StageResult:
-        """Place & route nextpnr-ecp5: Fmax / ritardo e utilizzo (informativa)."""
-        return run_implement(self.root, self.module, self._netlist, self.target_mhz,
-                             timeout=self.synth_timeout)
+        """Place & route multi-seed con wrapper a registri (informativa): physical.json/.md."""
+        return run_physical(self.root, self.module, self.rtl_files(), self._netlist,
+                            self.target_mhz, self.pnr_seeds, self.plan,
+                            timeout=self.synth_timeout)
 
     # ------------------------------------------------------------------ tutto
     def run_all(self, stop_on_error: bool = True) -> ToolchainReport:

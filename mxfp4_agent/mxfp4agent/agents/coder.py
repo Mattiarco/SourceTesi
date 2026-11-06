@@ -106,6 +106,60 @@ Il testbench deve terminare stampando `TEST PASSED (<n> vectors)` oppure
             return AgentResult(False, files, text, f"File mancanti: {', '.join(missing)}")
         return AgentResult(True, files, text)
 
+    # ------------------------------------------------------------------ PPA
+    def optimize(self, plan: dict, compiled_prompt: str, files, physical: dict,
+                 history: list[dict] | None = None) -> AgentResult:
+        """Chiede una variante con migliore Fmax/area, a parità di interfaccia e latenza.
+
+        La variante deve ripassare l'intera verifica: qui si produce solo il codice.
+        """
+        scala = next((f for f in files if f.ext == ".scala"), None)
+        if scala is None:
+            return AgentResult(False, None, "", "nessun sorgente Scala da ottimizzare")
+        a, f = physical.get("area_ecp5", {}), physical.get("fmax_mhz", {})
+        res = ", ".join(f"{k}={v}" for k, v in a.items()
+                        if k in ("LUT4", "CCU2C", "PFUMX", "L6MUX21", "TRELLIS_FF", "MULT18X18D"))
+        tried = ""
+        if history:
+            tried = "\n### VARIANTI GIA' PROVATE\n" + "\n".join(
+                f"- round {h['round']}: {h.get('outcome')} — Fmax {h.get('fmax_median')} MHz, "
+                f"LUT4 {h.get('lut4')}" for h in history)
+        seq = plan.get("clocking") == "sequential"
+        prompt = f"""{compiled_prompt}
+
+### OTTIMIZZAZIONE PPA
+Il modulo attuale e' CORRETTO (supera tutti i vettori del golden model). Metriche
+misurate su ECP5 LFE5U-85F con Yosys + nextpnr ({len(physical.get('seeds', []))} seed):
+- risorse: {res or 'n/d'}
+- Fmax registro->modulo->registro: mediana {f.get('median', 'n/d')} MHz
+  (min {f.get('min', 'n/d')}, max {f.get('max', 'n/d')}), obiettivo {physical.get('target_mhz')} MHz
+{tried}
+Produci una VARIANTE con Fmax piu' alta e/o meno risorse. Vincoli ASSOLUTI:
+- stesse porte (nomi, direzioni, tipi, larghezze) e stessa semantica bit a bit;
+- stessa latenza: {plan.get('latency_cycles', 0)} cicli{' (non aggiungere ne togliere stadi di pipeline)' if seq else ' (resta combinatorio: nessun registro)'};
+- il testbench e i valori attesi non cambiano.
+Idee tipiche: albero di somma bilanciato con +& invece di una catena; prodotti E2M1
+come LUT su codici a 3 bit invece di moltiplicatori generici (evita MULT18X18D);
+segno applicato dopo il prodotto delle magnitudini; larghezze minime giustificate.
+
+### CODICE ATTUALE
+### FILE: {scala.path}
+```scala
+{scala.content.rstrip()}
+```
+
+Rispondi con UNA riga `IDEA: <cosa cambi e perche'>` e poi il file completo nel
+formato `### FILE: {scala.path}`."""
+        text = self.ask(prompt, keep_history=False)
+        new = [x for x in self._retarget(extract_files(text)) if x.ext == ".scala"]
+        idea = next((ln.strip() for ln in text.splitlines()
+                     if ln.strip().upper().startswith("IDEA")), "")
+        if not new:
+            return AgentResult(False, None, text, f"nessun file Scala nella variante. {idea}")
+        variant = [x for x in files if x.ext != ".scala"] + [new[0]]
+        variant[-1].path = scala.path
+        return AgentResult(True, variant, text, idea)
+
     # ------------------------------------------------------------- normalize
     @staticmethod
     def _retarget(files):

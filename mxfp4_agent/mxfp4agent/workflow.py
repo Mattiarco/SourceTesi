@@ -131,7 +131,8 @@ class Workflow:
         tester = TesterAgent(self.providers["tester"], self.log, workdir,
                              synth=cfg.synth, target_mhz=cfg.target_mhz,
                              lint=cfg.chisel_lint, sbt_mode=cfg.sbt_mode,
-                             trace=cfg.trace, coverage=cfg.coverage)
+                             trace=cfg.trace, coverage=cfg.coverage,
+                             pnr_seeds=cfg.pnr_seeds)
 
         compiled = PlannerAgent.compile_coder_prompt(plan, cfg.request)
         workdir.mkdir(parents=True, exist_ok=True)
@@ -215,6 +216,8 @@ class Workflow:
 
             if tres.ok:
                 self.log.ok(f"VERIFICA SUPERATA — {tres.notes}")
+                if cfg.ppa_rounds > 0:
+                    files = self._ppa_loop(plan, compiled, files, coder, tester)
                 self._finalize(workdir, plan, files, True, tres.notes)
                 return RunResult(True, plan, files, workdir, rnd,
                                  tres.notes, self.trace, self._stats())
@@ -284,6 +287,73 @@ class Workflow:
         return RunResult(False, plan, files, workdir, cfg.max_fix_rounds, msg,
                          self.trace, self._stats())
 
+    # ------------------------------------------------------------------- PPA
+    @staticmethod
+    def _ppa_key(phys: dict) -> tuple[float, int]:
+        """Ordinamento delle varianti: Fmax mediana più alta, poi meno LUT4."""
+        fm = (phys.get("fmax_mhz") or {}).get("median") or 0.0
+        lut = (phys.get("area_ecp5") or {}).get("LUT4") or 10 ** 9
+        return fm, -lut
+
+    @classmethod
+    def _better(cls, new: dict, old: dict) -> bool:
+        (fn, ln), (fo, lo) = cls._ppa_key(new), cls._ppa_key(old)
+        if fo and abs(fn - fo) <= 0.01 * fo:          # Fmax pari entro l'1%: decide l'area
+            return ln > lo
+        return fn > fo
+
+    def _ppa_loop(self, plan: dict, compiled: str, files, coder, tester):
+        """--ppa-rounds: varianti ottimizzate che devono ripassare TUTTA la verifica."""
+        cfg = self.cfg
+        best_files, best_phys = files, dict(self._physical or {})
+        if not (best_phys.get("fmax_mhz") or {}).get("n"):
+            self.log.fail("PPA saltato: nessuna Fmax misurata (yosys/nextpnr assenti?)")
+            return files
+        self.ppa_history: list[dict] = []
+        on_disk_is_best = True        # il progetto su disco corrisponde a best_files?
+        for p in range(1, cfg.ppa_rounds + 1):
+            self.log.stage("coder", f"PPA round {p}: variante ottimizzata…")
+            try:
+                ores = coder.optimize(plan, compiled, best_files, best_phys, self.ppa_history)
+            except LLMError as e:
+                self.log.fail(f"PPA interrotto: {e}")
+                break
+            entry = {"round": p, "idea": ores.notes}
+            if not ores.ok:
+                entry["outcome"] = "nessun codice"
+                self.ppa_history.append(entry)
+                continue
+            try:
+                tres = tester.run(plan, ores.payload, cfg.num_random_vectors, cfg.vector_seed,
+                                  diagnose=False, round_id=f"ppa{p}")
+            except LLMError:
+                tres = None
+            on_disk_is_best = False
+            phys = tres.payload.physical if tres is not None and tres.payload else {}
+            entry.update({"fmax_median": (phys.get("fmax_mhz") or {}).get("median"),
+                          "lut4": (phys.get("area_ecp5") or {}).get("LUT4")})
+            if tres is None or not tres.ok:
+                entry["outcome"] = ("verifica fallita: " +
+                                    (tres.payload.summary() if tres and tres.payload else "n/d"))
+            elif self._better(phys, best_phys):
+                entry["outcome"] = "adottata"
+                best_files, best_phys = ores.payload, phys
+                on_disk_is_best = True
+            else:
+                entry["outcome"] = "corretta ma non migliore"
+            self.log.info(f"PPA round {p}: {entry['outcome']} — Fmax {entry['fmax_median']} "
+                          f"MHz, LUT4 {entry['lut4']}")
+            self.ppa_history.append(entry)
+            self._t("coder", "ppa", **entry)
+
+        if not on_disk_is_best:
+            # Gli artefatti su disco (RTL, physical.json…) devono corrispondere al
+            # design scelto: si riesegue la toolchain sulla variante migliore.
+            tester.run(plan, best_files, cfg.num_random_vectors, cfg.vector_seed,
+                       diagnose=False, round_id="ppa_final")
+        self._physical = best_phys
+        return best_files
+
     # -------------------------------------------------------------- finalize
     @staticmethod
     def fixer_evidence(fail, workdir: Path, report=None, tail_chars: int = 1500) -> str:
@@ -333,6 +403,7 @@ class Workflow:
             "llm": {role: p.meta() for role, p in self.providers.items()},
             "llm_stats": self._stats(),
             "physical": getattr(self, "_physical", {}),
+            "ppa": getattr(self, "ppa_history", None),
             "trace": self.trace,
         }
         (workdir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False),

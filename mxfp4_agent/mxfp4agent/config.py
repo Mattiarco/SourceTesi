@@ -50,6 +50,8 @@ class Config:
     vector_seed: int = 1234            # seed dei vettori casuali: fisso fra le run di un bench
     synth: bool = True                 # sintesi Yosys + P&R nextpnr dopo la simulazione
     target_mhz: float = 100.0          # vincolo di frequenza per il timing (nextpnr)
+    pnr_seeds: int = 5                 # seed di place & route (mediana/min/max della Fmax)
+    ppa_rounds: int = 0                # varianti ottimizzate per area/Fmax dopo la verifica
     verbose: bool = True
 
     def agent_model(self, agent: str) -> str | None:

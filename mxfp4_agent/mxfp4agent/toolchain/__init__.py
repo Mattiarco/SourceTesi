@@ -1,5 +1,6 @@
 from .runner import StageResult, ToolchainReport, ToolchainRunner
-from .synth import parse_nextpnr_log, parse_yosys_stat, run_implement, run_synth
+from .physical import parse_nextpnr_report, run_physical
+from .synth import parse_nextpnr_log, parse_yosys_stat, run_synth
 from .scaffold import scaffold
 from .shell import check_path_sanity, format_tool_report, run, tool_report, which
 from .testvectors import HEADER_CONTRACT, HEADER_NAME, build_vectors, render_header, write_header
